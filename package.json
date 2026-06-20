@@ -1,0 +1,24 @@
+{
+  "name": "cfb-spread-pool-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "College football spread pool app",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "firebase": "^12.15.0",
+    "lucide-react": "^0.383.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
+    "@vitejs/plugin-react": "^6.0.2",
+    "tailwindcss": "^4.3.1",
+    "vite": "^8.0.16"
+  }
+}

@@ -1,0 +1,25 @@
+rules_version = '2';
+
+// Paste this into: Firebase Console > Firestore Database > Rules tab > Publish.
+//
+// This allows read/write only on the three collections this app uses — not
+// the whole database. There's no login system here (by design, to keep this
+// simple for a friend group), so these rules don't check *who* is writing,
+// only *what* they're allowed to touch. Anyone with your Firebase project
+// config (which is not secret, but also not advertised anywhere) could in
+// theory write directly to these collections outside the app. That's an
+// acceptable tradeoff for a private link shared with friends — this is not
+// meant to hold sensitive data.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /leagueMeta/{docId} {
+      allow read, write: if true;
+    }
+    match /weeks/{docId} {
+      allow read, write: if true;
+    }
+    match /picks/{docId} {
+      allow read, write: if true;
+    }
+  }
+}
