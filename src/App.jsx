@@ -27,6 +27,7 @@ import {
   DollarSign,
   Send,
   Copy,
+  Eye,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -490,6 +491,7 @@ export default function App() {
       weekNum,
       games,
       locked,
+      showPicksEarly: existing?.showPicksEarly || false,
       graded: existing?.graded && existing.games.length === games.length ? existing.graded : false,
     };
     // preserve scores for games whose id already existed
@@ -524,6 +526,14 @@ export default function App() {
     const week = weekCache[weekNum];
     if (!week) return;
     const payload = { ...week, locked: !week.locked };
+    const r = await storage.set(`week:${weekNum}:games`, JSON.stringify(payload), true).catch(() => null);
+    if (r) setWeekCache((prev) => ({ ...prev, [weekNum]: payload }));
+  }
+
+  async function toggleShowPicksEarly(weekNum) {
+    const week = weekCache[weekNum];
+    if (!week) return;
+    const payload = { ...week, showPicksEarly: !week.showPicksEarly };
     const r = await storage.set(`week:${weekNum}:games`, JSON.stringify(payload), true).catch(() => null);
     if (r) setWeekCache((prev) => ({ ...prev, [weekNum]: payload }));
   }
@@ -1287,6 +1297,7 @@ export default function App() {
             loadWeek={loadWeek}
             saveWeekGames={saveWeekGames}
             toggleLock={toggleLock}
+            toggleShowPicksEarly={toggleShowPicksEarly}
             saveResults={saveResults}
             winTotalsCache={winTotalsCache}
             loadWinTotals={loadWinTotals}
@@ -1489,7 +1500,10 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
 
       {!week.locked && (
         <div className="text-sm" style={{ color: COLORS.chalkDim }}>
-          {submittedCount} of {leagueMeta.members.length} have submitted picks. Picks stay hidden from each other until the commissioner locks the week.
+          {submittedCount} of {leagueMeta.members.length} have submitted picks.{" "}
+          {week.showPicksEarly
+            ? "The commissioner has made picks visible to everyone this week, even before lock."
+            : "Picks stay hidden from each other until the commissioner locks the week."}
         </div>
       )}
 
@@ -1513,14 +1527,14 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
         ))}
       </div>
 
-      {viewMode === "everyone" && !week.locked && (
+      {viewMode === "everyone" && !week.locked && !week.showPicksEarly && (
         <EmptyState
           title="Picks are still hidden"
           body="Everyone's picks stay private until the commissioner locks the week — check back after that."
         />
       )}
 
-      {viewMode === "everyone" && week.locked && (
+      {viewMode === "everyone" && (week.locked || week.showPicksEarly) && (
         <PicksGrid leagueMeta={leagueMeta} week={week} picksCache={picksCache[selectedWeek] || {}} slugToName={slugToName} />
       )}
 
@@ -1819,6 +1833,7 @@ function CommishTab({
   loadWeek,
   saveWeekGames,
   toggleLock,
+  toggleShowPicksEarly,
   saveResults,
   winTotalsCache,
   loadWinTotals,
@@ -1904,6 +1919,7 @@ function CommishTab({
           loadWeek={loadWeek}
           saveWeekGames={saveWeekGames}
           toggleLock={toggleLock}
+          toggleShowPicksEarly={toggleShowPicksEarly}
         />
       )}
 
@@ -2020,7 +2036,7 @@ function emptyGame() {
   return { id: newId(), away: "", home: "", favorite: "home", spread: "" };
 }
 
-function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock }) {
+function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly }) {
   const nextWeekNum = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) + 1 : 1;
   const [selectedWeek, setSelectedWeek] = useState(null); // null = new week
   const [games, setGames] = useState(Array.from({ length: 10 }, emptyGame));
@@ -2421,6 +2437,18 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           >
             {currentWeekData.locked ? <Lock size={12} /> : <Unlock size={12} />}
             {currentWeekData.locked ? "locked — click to open" : "open — click to lock"}
+          </button>
+          <button
+            onClick={() => toggleShowPicksEarly(selectedWeek)}
+            className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2 flex items-center gap-1"
+            style={{
+              background: currentWeekData.showPicksEarly ? "rgba(217,164,65,0.16)" : "transparent",
+              border: `1px solid ${currentWeekData.showPicksEarly ? COLORS.gold : COLORS.lineStrong}`,
+              color: currentWeekData.showPicksEarly ? COLORS.goldBright : COLORS.chalkDim,
+            }}
+          >
+            <Eye size={12} />
+            {currentWeekData.showPicksEarly ? "picks visible early — click to hide until lock" : "picks hidden until lock — click to show early"}
           </button>
         </div>
       )}
