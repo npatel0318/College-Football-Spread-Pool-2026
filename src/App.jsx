@@ -161,9 +161,20 @@ const DEFAULT_MONEY_SETTINGS = {
   weeklyWinAmount: 25,
   weeklyLossAmount: 10,
   lockAmount: 10,
+  underdogTier1Amount: 5, // +14 to +19.5
+  underdogTier2Amount: 10, // +20 to +27.5
+  underdogTier3Amount: 20, // +28 or more
   secondPlacePayout: 100,
   thirdPlacePayout: 50,
 };
+
+function underdogPayout(spread, settings) {
+  const s = Number(spread);
+  if (isNaN(s) || s < 14) return 0;
+  if (s <= 19.5) return settings.underdogTier1Amount;
+  if (s <= 27.5) return settings.underdogTier2Amount;
+  return settings.underdogTier3Amount;
+}
 
 function fmtMoney(n) {
   const sign = n < 0 ? "-" : "";
@@ -481,6 +492,40 @@ export default function App() {
       ...prev,
       [weekNum]: { ...(prev[weekNum] || {}), [mySlug]: payload },
     }));
+  }
+
+  async function saveUnderdogPick(weekNum, underdogPick) {
+    const mySlug = slugify(myName);
+    const existing = picksCache[weekNum]?.[mySlug] || {};
+    const payload = { ...existing, name: myName, underdogPick, underdogResult: null, submittedAt: Date.now() };
+    const r = await storage
+      .set(`week:${weekNum}:picks:${mySlug}`, JSON.stringify(payload), true)
+      .catch(() => null);
+    if (!r) {
+      setError("Your underdog pick didn't save — check your connection and try again.");
+      return false;
+    }
+    setPicksCache((prev) => ({
+      ...prev,
+      [weekNum]: { ...(prev[weekNum] || {}), [mySlug]: payload },
+    }));
+    return true;
+  }
+
+  async function saveUnderdogResults(weekNum, resultsBySlug) {
+    const weekPicks = picksCache[weekNum] || {};
+    const updates = {};
+    for (const [slug, result] of Object.entries(resultsBySlug)) {
+      const existing = weekPicks[slug];
+      if (!existing) continue;
+      const payload = { ...existing, underdogResult: result };
+      const r = await storage.set(`week:${weekNum}:picks:${slug}`, JSON.stringify(payload), true).catch(() => null);
+      if (r) updates[slug] = payload;
+    }
+    if (Object.keys(updates).length) {
+      setPicksCache((prev) => ({ ...prev, [weekNum]: { ...(prev[weekNum] || {}), ...updates } }));
+    }
+    return true;
   }
 
   /* ---------- commissioner actions ---------- */
@@ -943,7 +988,9 @@ export default function App() {
     setMoneyLoading(true);
     const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
     const perMember = {};
-    leagueMeta.members.forEach((m) => (perMember[m] = { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0 }));
+    leagueMeta.members.forEach(
+      (m) => (perMember[m] = { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0, underdogWin: 0 })
+    );
 
     for (const w of leagueMeta.weeks) {
       const raw = await safeGet(`week:${w}:games`, true);
@@ -954,12 +1001,16 @@ export default function App() {
       const keys = list?.keys || [];
       const weekWins = {}; // member -> wins this week (only members who played)
       const picksByMember = {};
+      const allPicksByMember = {}; // includes members who only submitted an underdog pick
       for (const k of keys) {
         const raw2 = await safeGet(k, true);
         if (!raw2) continue;
         const picksObj = JSON.parse(raw2);
         const member = picksObj.name || slugToName[k.slice(`week:${w}:picks:`.length)];
-        if (!member || !picksObj.picks || Object.keys(picksObj.picks).length === 0) continue;
+        if (!member) continue;
+        if (!perMember[member]) perMember[member] = { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0, underdogWin: 0 };
+        allPicksByMember[member] = picksObj;
+        if (!picksObj.picks || Object.keys(picksObj.picks).length === 0) continue;
         picksByMember[member] = picksObj;
         let wins = 0;
         weekObj.games.forEach((g) => {
@@ -967,7 +1018,6 @@ export default function App() {
           if (cover && cover !== "push" && picksObj.picks[g.id] === cover) wins++;
         });
         weekWins[member] = wins;
-        if (!perMember[member]) perMember[member] = { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0 };
       }
 
       // Weekly winner/loser money — only if there's an actual spread of results that week.
@@ -997,6 +1047,12 @@ export default function App() {
         if (myPick === cover) perMember[member].lockWin += settings.lockAmount;
         else perMember[member].lockLoss += settings.lockAmount;
       });
+
+      // Underdog of the week — pure bonus, no cost on a miss.
+      Object.entries(allPicksByMember).forEach(([member, picksObj]) => {
+        if (!picksObj.underdogPick || picksObj.underdogResult !== true) return;
+        perMember[member].underdogWin += underdogPayout(picksObj.underdogPick.spread, settings);
+      });
     }
 
     const totalBuyIns = settings.buyIn * leagueMeta.members.length;
@@ -1004,13 +1060,16 @@ export default function App() {
     let totalWeeklyLossesOwed = 0;
     let totalLockWinsPaid = 0;
     let totalLockLossesOwed = 0;
+    let totalUnderdogWinsPaid = 0;
     Object.values(perMember).forEach((m) => {
       totalWeeklyWinsPaid += m.weeklyWin;
       totalWeeklyLossesOwed += m.weeklyLoss;
       totalLockWinsPaid += m.lockWin;
       totalLockLossesOwed += m.lockLoss;
+      totalUnderdogWinsPaid += m.underdogWin;
     });
-    const potRemaining = totalBuyIns - totalWeeklyWinsPaid + totalWeeklyLossesOwed - totalLockWinsPaid + totalLockLossesOwed;
+    const potRemaining =
+      totalBuyIns - totalWeeklyWinsPaid + totalWeeklyLossesOwed - totalLockWinsPaid + totalLockLossesOwed - totalUnderdogWinsPaid;
 
     setMoneyData({
       perMember,
@@ -1019,6 +1078,7 @@ export default function App() {
       totalWeeklyLossesOwed,
       totalLockWinsPaid,
       totalLockLossesOwed,
+      totalUnderdogWinsPaid,
       potRemaining,
     });
     setMoneyLoading(false);
@@ -1230,6 +1290,7 @@ export default function App() {
             savingGameId={savingGameId}
             slugToName={slugToName}
             toggleMyLock={toggleMyLock}
+            saveUnderdogPick={saveUnderdogPick}
           />
         )}
 
@@ -1284,6 +1345,8 @@ export default function App() {
             leagueMeta={leagueMeta}
             commishUnlocked={commishUnlocked}
             passcodeInput={passcodeInput}
+            picksCache={picksCache}
+            saveUnderdogResults={saveUnderdogResults}
             setPasscodeInput={setPasscodeInput}
             onUnlock={() => {
               if (passcodeInput === leagueMeta.commissionerPasscode) {
@@ -1444,7 +1507,7 @@ function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
 
 /* ------------------------------- picks tab --------------------------------- */
 
-function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock }) {
+function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock, saveUnderdogPick }) {
   const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone"
 
   useEffect(() => {
@@ -1471,6 +1534,8 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   const mySlug = slugify(myName);
   const myPicks = picksCache[selectedWeek]?.[mySlug]?.picks || {};
   const myLockedGameId = picksCache[selectedWeek]?.[mySlug]?.lockedGameId || null;
+  const myUnderdogPick = picksCache[selectedWeek]?.[mySlug]?.underdogPick || null;
+  const myUnderdogResult = picksCache[selectedWeek]?.[mySlug]?.underdogResult ?? null;
   const allEntries = Object.entries(picksCache[selectedWeek] || {});
   const submittedCount = allEntries.filter(([, v]) => v && Object.keys(v.picks || {}).length > 0).length;
 
@@ -1683,6 +1748,14 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
           })}
         </div>
       </div>
+
+      <UnderdogOfWeekCard
+        weekNum={selectedWeek}
+        locked={week.locked}
+        existingPick={myUnderdogPick}
+        existingResult={myUnderdogResult}
+        saveUnderdogPick={saveUnderdogPick}
+      />
         </>
       )}
     </div>
@@ -1693,6 +1766,89 @@ function isCorrectIcon(cover, myPick) {
   if (!myPick || cover === "push") return null;
   if (cover === myPick) return <CheckCircle2 size={14} style={{ color: COLORS.goldBright }} />;
   return <XCircle size={14} style={{ color: COLORS.redBright }} />;
+}
+
+function UnderdogOfWeekCard({ weekNum, locked, existingPick, existingResult, saveUnderdogPick }) {
+  const [team, setTeam] = useState(existingPick?.team || "");
+  const [opponent, setOpponent] = useState(existingPick?.opponent || "");
+  const [spread, setSpread] = useState(existingPick?.spread != null ? String(existingPick.spread) : "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setTeam(existingPick?.team || "");
+    setOpponent(existingPick?.opponent || "");
+    setSpread(existingPick?.spread != null ? String(existingPick.spread) : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekNum]);
+
+  const spreadNum = Number(spread);
+  const valid = team.trim() && opponent.trim() && spread !== "" && !isNaN(spreadNum) && spreadNum >= 14;
+
+  let resultColor = COLORS.chalkDim;
+  if (existingResult === true) resultColor = COLORS.goldBright;
+  else if (existingResult === false) resultColor = COLORS.redBright;
+
+  return (
+    <div className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+      <div className="cfb-mono text-xs uppercase mb-2 flex items-center gap-1.5" style={{ color: COLORS.gold }}>
+        <Flame size={13} /> Underdog of the week (optional)
+      </div>
+      <div className="text-xs mb-2" style={{ color: COLORS.muted }}>
+        Any FBS game, doesn't have to be on this week's list. Underdog must be getting at least +14 and must win
+        outright. +14 to +19.5 pays {fmtMoney(DEFAULT_MONEY_SETTINGS.underdogTier1Amount)}, +20 to +27.5 pays{" "}
+        {fmtMoney(DEFAULT_MONEY_SETTINGS.underdogTier2Amount)}, +28 or more pays{" "}
+        {fmtMoney(DEFAULT_MONEY_SETTINGS.underdogTier3Amount)} (amounts set by the commissioner). No cost if it misses.
+      </div>
+      <div className="space-y-2">
+        <FieldInput value={team} onChange={setTeam} placeholder="Underdog team" disabled={locked} />
+        <FieldInput value={opponent} onChange={setOpponent} placeholder="Opponent" disabled={locked} />
+        <FieldInput type="number" value={spread} onChange={setSpread} placeholder="Spread (e.g. 16.5)" disabled={locked} />
+      </div>
+      {!locked && (
+        <div className="mt-2 flex items-center gap-3">
+          <SecondaryButton
+            disabled={!valid || saving}
+            onClick={async () => {
+              setSaving(true);
+              await saveUnderdogPick(weekNum, { team: team.trim(), opponent: opponent.trim(), spread: spreadNum });
+              setSaving(false);
+            }}
+          >
+            {saving ? "Saving..." : "Save underdog pick"}
+          </SecondaryButton>
+          {existingPick && (
+            <button
+              onClick={async () => {
+                setSaving(true);
+                await saveUnderdogPick(weekNum, null);
+                setTeam("");
+                setOpponent("");
+                setSpread("");
+                setSaving(false);
+              }}
+              className="cfb-mono text-xs"
+              style={{ color: COLORS.muted }}
+            >
+              clear
+            </button>
+          )}
+        </div>
+      )}
+      {!valid && (team || opponent || spread) && !locked && (
+        <div className="text-xs mt-1.5" style={{ color: COLORS.muted }}>
+          Needs a team, an opponent, and a spread of at least +14.
+        </div>
+      )}
+      {existingPick && (
+        <div className="cfb-mono text-xs mt-2" style={{ color: resultColor }}>
+          {existingPick.team} +{existingPick.spread} vs {existingPick.opponent}
+          {existingResult === true && " — hit!"}
+          {existingResult === false && " — missed"}
+          {existingResult == null && locked && " — pending"}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
@@ -1746,6 +1902,26 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                 </tr>
               );
             })}
+            <tr style={{ borderTop: `2px solid ${COLORS.lineStrong}` }}>
+              <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
+                <span className="inline-flex items-center gap-1">
+                  <Flame size={11} style={{ color: COLORS.gold }} /> dog
+                </span>
+              </td>
+              {members.map((m) => {
+                const slug = slugify(m);
+                const pick = picksCache[slug]?.underdogPick;
+                const result = picksCache[slug]?.underdogResult;
+                let color = COLORS.chalkDim;
+                if (pick && result === true) color = COLORS.goldBright;
+                else if (pick && result === false) color = COLORS.redBright;
+                return (
+                  <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
+                    {pick ? `${pick.team} +${pick.spread}` : "—"}
+                  </td>
+                );
+              })}
+            </tr>
           </tbody>
         </table>
       </div>
@@ -1827,6 +2003,8 @@ function CommishTab({
   leagueMeta,
   commishUnlocked,
   passcodeInput,
+  picksCache,
+  saveUnderdogResults,
   setPasscodeInput,
   onUnlock,
   weekCache,
@@ -1924,7 +2102,14 @@ function CommishTab({
       )}
 
       {mode === "results" && (
-        <ResultsManager leagueMeta={leagueMeta} weekCache={weekCache} loadWeek={loadWeek} saveResults={saveResults} />
+        <ResultsManager
+          leagueMeta={leagueMeta}
+          weekCache={weekCache}
+          loadWeek={loadWeek}
+          saveResults={saveResults}
+          picksCache={picksCache}
+          saveUnderdogResults={saveUnderdogResults}
+        />
       )}
 
       {mode === "wtBoard" && (
@@ -2786,15 +2971,18 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   );
 }
 
-function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults }) {
+function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, picksCache, saveUnderdogResults }) {
   const [selectedWeek, setSelectedWeek] = useState(leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) : null);
   const [scores, setScores] = useState({});
   const [busy, setBusy] = useState(false);
+  const [udStatuses, setUdStatuses] = useState({}); // slug -> "yes" | "no" | ""
+  const [udBusy, setUdBusy] = useState(false);
   const week = selectedWeek != null ? weekCache[selectedWeek] : null;
+  const weekPicks = selectedWeek != null ? picksCache[selectedWeek] || {} : {};
 
   useEffect(() => {
     if (selectedWeek != null && !weekCache[selectedWeek]) {
-      loadWeek(selectedWeek, false);
+      loadWeek(selectedWeek, true);
     }
   }, [selectedWeek, weekCache, loadWeek]);
 
@@ -2807,6 +2995,17 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults }) {
       setScores(init);
     }
   }, [week?.weekNum]);
+
+  useEffect(() => {
+    const init = {};
+    Object.entries(weekPicks).forEach(([slug, p]) => {
+      if (p?.underdogPick) {
+        init[slug] = p.underdogResult === true ? "yes" : p.underdogResult === false ? "no" : "";
+      }
+    });
+    setUdStatuses(init);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWeek, Object.keys(weekPicks).length]);
 
   if (!leagueMeta.weeks.length) {
     return <EmptyState title="No weeks yet" body="Create a week under Manage games first." />;
@@ -2874,6 +3073,73 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults }) {
           >
             {busy ? "Saving..." : "Save results"}
           </PrimaryButton>
+
+          {Object.entries(weekPicks).filter(([, p]) => p?.underdogPick).length > 0 && (
+            <div className="mt-2 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+              <div className="cfb-display text-lg uppercase mb-2">Underdog of the week</div>
+              <div className="text-xs mb-3" style={{ color: COLORS.muted }}>
+                Mark each submitted underdog pick yes/no once that game's final is known. The underdog must have won
+                outright to hit.
+              </div>
+              <div className="space-y-2">
+                {Object.entries(weekPicks)
+                  .filter(([, p]) => p?.underdogPick)
+                  .map(([slug, p]) => (
+                    <div
+                      key={slug}
+                      className="flex items-center gap-2 px-3 py-2"
+                      style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold truncate">{p.name || slug}</div>
+                        <div className="cfb-mono text-xs truncate" style={{ color: COLORS.muted }}>
+                          {p.underdogPick.team} +{p.underdogPick.spread} vs {p.underdogPick.opponent}
+                        </div>
+                      </div>
+                      <div className="flex gap-1.5 flex-shrink-0">
+                        {["yes", "no"].map((opt) => (
+                          <button
+                            key={opt}
+                            onClick={() => setUdStatuses((prev) => ({ ...prev, [slug]: opt }))}
+                            className="cfb-mono cfb-btn text-xs font-semibold px-2.5 py-2 capitalize"
+                            style={{
+                              background:
+                                udStatuses[slug] === opt
+                                  ? opt === "yes"
+                                    ? "rgba(217,164,65,0.18)"
+                                    : "rgba(179,55,42,0.18)"
+                                  : "transparent",
+                              border: `1px solid ${
+                                udStatuses[slug] === opt ? (opt === "yes" ? COLORS.gold : COLORS.red) : COLORS.lineStrong
+                              }`,
+                              color: udStatuses[slug] === opt ? (opt === "yes" ? COLORS.goldBright : COLORS.redBright) : COLORS.chalkDim,
+                            }}
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+              <div className="mt-3">
+                <SecondaryButton
+                  disabled={udBusy}
+                  onClick={async () => {
+                    setUdBusy(true);
+                    const mapped = {};
+                    Object.entries(udStatuses).forEach(([slug, v]) => {
+                      mapped[slug] = v === "yes" ? true : v === "no" ? false : null;
+                    });
+                    await saveUnderdogResults(selectedWeek, mapped);
+                    setUdBusy(false);
+                  }}
+                >
+                  {udBusy ? "Saving..." : "Save underdog results"}
+                </SecondaryButton>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -4121,12 +4387,13 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
   const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
   const rows = leagueMeta.members
     .map((name) => {
-      const m = moneyData.perMember[name] || { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0 };
+      const m = moneyData.perMember[name] || { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0, underdogWin: 0 };
       const weeklyNet = m.weeklyWin - m.weeklyLoss;
       const lockNet = m.lockWin - m.lockLoss;
+      const underdogWin = m.underdogWin || 0;
       const seasonPayout = leagueMeta.seasonFinalized ? leagueMeta.seasonPayouts?.[name] || 0 : 0;
-      const total = weeklyNet + lockNet + seasonPayout;
-      return { name, weeklyNet, lockNet, seasonPayout, total };
+      const total = weeklyNet + lockNet + underdogWin + seasonPayout;
+      return { name, weeklyNet, lockNet, underdogWin, seasonPayout, total };
     })
     .sort((a, b) => b.total - a.total);
 
@@ -4163,7 +4430,7 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
       </div>
       <div className="text-xs" style={{ color: COLORS.muted }}>
         Buy-in is {fmtMoney(settings.buyIn)} per person. Paid out so far:{" "}
-        {fmtMoney(moneyData.totalWeeklyWinsPaid + moneyData.totalLockWinsPaid)}. Owed back to the pot:{" "}
+        {fmtMoney(moneyData.totalWeeklyWinsPaid + moneyData.totalLockWinsPaid + moneyData.totalUnderdogWinsPaid)}. Owed back to the pot:{" "}
         {fmtMoney(moneyData.totalWeeklyLossesOwed + moneyData.totalLockLossesOwed)}.
       </div>
 
@@ -4174,6 +4441,7 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
               <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weekly</th>
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>lock</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>underdog</th>
               {leagueMeta.seasonFinalized && (
                 <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>payout</th>
               )}
@@ -4195,6 +4463,12 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
                   style={{ color: r.lockNet > 0 ? COLORS.goldBright : r.lockNet < 0 ? COLORS.redBright : COLORS.chalkDim }}
                 >
                   {fmtMoney(r.lockNet)}
+                </td>
+                <td
+                  className="px-3 py-2 text-right"
+                  style={{ color: r.underdogWin > 0 ? COLORS.goldBright : COLORS.chalkDim }}
+                >
+                  {fmtMoney(r.underdogWin)}
                 </td>
                 {leagueMeta.seasonFinalized && (
                   <td className="px-3 py-2 text-right" style={{ color: COLORS.goldBright }}>{fmtMoney(r.seasonPayout)}</td>
@@ -4233,6 +4507,9 @@ function MoneySettingsManager({
     weeklyWinAmount: String(current.weeklyWinAmount),
     weeklyLossAmount: String(current.weeklyLossAmount),
     lockAmount: String(current.lockAmount),
+    underdogTier1Amount: String(current.underdogTier1Amount),
+    underdogTier2Amount: String(current.underdogTier2Amount),
+    underdogTier3Amount: String(current.underdogTier3Amount),
     secondPlacePayout: String(current.secondPlacePayout),
     thirdPlacePayout: String(current.thirdPlacePayout),
   });
@@ -4266,6 +4543,9 @@ function MoneySettingsManager({
             ["weeklyWinAmount", "Weekly best-record prize"],
             ["weeklyLossAmount", "Weekly worst-record fee"],
             ["lockAmount", "Lock of the week"],
+            ["underdogTier1Amount", "Underdog +14 to +19.5"],
+            ["underdogTier2Amount", "Underdog +20 to +27.5"],
+            ["underdogTier3Amount", "Underdog +28 or more"],
             ["secondPlacePayout", "Season 2nd place"],
             ["thirdPlacePayout", "Season 3rd place"],
           ].map(([field, label]) => (
@@ -4287,6 +4567,9 @@ function MoneySettingsManager({
                 weeklyWinAmount: Number(form.weeklyWinAmount),
                 weeklyLossAmount: Number(form.weeklyLossAmount),
                 lockAmount: Number(form.lockAmount),
+                underdogTier1Amount: Number(form.underdogTier1Amount),
+                underdogTier2Amount: Number(form.underdogTier2Amount),
+                underdogTier3Amount: Number(form.underdogTier3Amount),
                 secondPlacePayout: Number(form.secondPlacePayout),
                 thirdPlacePayout: Number(form.thirdPlacePayout),
               });
