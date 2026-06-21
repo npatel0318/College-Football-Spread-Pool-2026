@@ -740,10 +740,21 @@ export default function App() {
   const loadStandings = useCallback(async () => {
     if (!leagueMeta) return;
     setStandingsLoading(true);
+    const blank = () => ({
+      weeklyWins: 0,
+      weeklyLosses: 0,
+      winTotalsWins: 0,
+      winTotalsLosses: 0,
+      playoffWins: 0,
+      playoffLosses: 0,
+      totalWins: 0,
+      totalLosses: 0,
+      weeksPlayed: 0,
+      weeksWon: 0,
+      breakdown: {},
+    });
     const results = {};
-    leagueMeta.members.forEach(
-      (m) => (results[m] = { weeklyCorrect: 0, playoffCorrect: 0, correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} })
-    );
+    leagueMeta.members.forEach((m) => (results[m] = blank()));
 
     for (const w of leagueMeta.weeks) {
       const raw = await safeGet(`week:${w}:games`, true);
@@ -752,30 +763,69 @@ export default function App() {
       if (!weekObj.graded) continue;
       const list = await storage.list(`week:${w}:picks:`, true).catch(() => null);
       const keys = list?.keys || [];
-      const weekCorrect = {};
+      const weekWins = {};
       for (const k of keys) {
         const raw2 = await safeGet(k, true);
         if (!raw2) continue;
         const picksObj = JSON.parse(raw2);
         const member = picksObj.name || slugToName[k.slice(`week:${w}:picks:`.length)];
         if (!member) continue;
-        let correct = 0;
+        let wins = 0;
+        let losses = 0;
         weekObj.games.forEach((g) => {
           const cover = coveringSide(g);
-          if (cover && cover !== "push" && picksObj.picks[g.id] === cover) correct++;
+          const pick = picksObj.picks[g.id];
+          if (!cover || cover === "push" || !pick) return;
+          if (pick === cover) wins++;
+          else losses++;
         });
-        if (!results[member]) results[member] = { weeklyCorrect: 0, playoffCorrect: 0, correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} };
-        results[member].weeklyCorrect += correct;
+        if (!results[member]) results[member] = blank();
+        results[member].weeklyWins += wins;
+        results[member].weeklyLosses += losses;
         results[member].weeksPlayed += 1;
-        results[member].breakdown[w] = correct;
-        weekCorrect[member] = correct;
+        results[member].breakdown[w] = wins;
+        weekWins[member] = wins;
       }
-      const vals = Object.values(weekCorrect);
+      const vals = Object.values(weekWins);
       if (vals.length) {
         const max = Math.max(...vals);
-        Object.entries(weekCorrect).forEach(([member, c]) => {
+        Object.entries(weekWins).forEach(([member, c]) => {
           if (c === max && max > 0) results[member].weeksWon += 1;
         });
+      }
+    }
+
+    // Merge in win-totals scoring (most recent year) — counts toward the same total.
+    const winTotalsYears = leagueMeta.winTotalsYears || [];
+    if (winTotalsYears.length) {
+      const wtYear = Math.max(...winTotalsYears);
+      const raw = await safeGet(`wintotals:${wtYear}:board`, true);
+      if (raw) {
+        const board = JSON.parse(raw);
+        const teamsById = {};
+        board.teams.forEach((t) => (teamsById[t.id] = t));
+        const list = await storage.list(`wintotals:${wtYear}:picks:`, true).catch(() => null);
+        const keys = list?.keys || [];
+        for (const k of keys) {
+          const raw2 = await safeGet(k, true);
+          if (!raw2) continue;
+          const picksObj = JSON.parse(raw2);
+          const member = picksObj.name;
+          if (!member) continue;
+          if (!results[member]) results[member] = blank();
+          let wins = 0;
+          let losses = 0;
+          (picksObj.picks || []).forEach((p) => {
+            const team = teamsById[p.teamId];
+            if (!team) return;
+            const cover = winTotalCover(team);
+            if (!cover || cover === "push") return;
+            if (p.side === cover) wins++;
+            else losses++;
+          });
+          results[member].winTotalsWins = wins;
+          results[member].winTotalsLosses = losses;
+        }
       }
     }
 
@@ -796,19 +846,24 @@ export default function App() {
           const picksObj = JSON.parse(raw2);
           const member = picksObj.name;
           if (!member) continue;
-          if (!results[member]) results[member] = { weeklyCorrect: 0, playoffCorrect: 0, correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} };
-          let correct = 0;
+          if (!results[member]) results[member] = blank();
+          let wins = 0;
+          let losses = 0;
           (picksObj.picks || []).forEach((p) => {
             const team = teamsById[p.teamId];
-            if (team && team.madePlayoff === true) correct++;
+            if (!team || team.madePlayoff == null) return;
+            if (team.madePlayoff === true) wins++;
+            else losses++;
           });
-          results[member].playoffCorrect = correct;
+          results[member].playoffWins = wins;
+          results[member].playoffLosses = losses;
         }
       }
     }
 
     Object.values(results).forEach((r) => {
-      r.correct = r.weeklyCorrect + r.playoffCorrect;
+      r.totalWins = r.weeklyWins + r.winTotalsWins + r.playoffWins;
+      r.totalLosses = r.weeklyLosses + r.winTotalsLosses + r.playoffLosses;
     });
 
     setStandings(results);
@@ -1427,10 +1482,14 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
 
   const rows = Object.entries(standings || {})
     .map(([name, s]) => ({ name, ...s }))
-    .sort((a, b) => b.correct - a.correct);
+    .sort((a, b) => b.totalWins - a.totalWins);
 
   const gradedWeeks = leagueMeta.weeks.length;
-  const hasPlayoffPoints = rows.some((r) => r.playoffCorrect > 0);
+  const hasWinTotals = rows.some((r) => r.winTotalsWins > 0 || r.winTotalsLosses > 0);
+  const hasPlayoff = rows.some((r) => r.playoffWins > 0 || r.playoffLosses > 0);
+  const isEmpty =
+    rows.length === 0 ||
+    rows.every((r) => r.weeksPlayed === 0 && !r.winTotalsWins && !r.winTotalsLosses && !r.playoffWins && !r.playoffLosses);
 
   return (
     <div className="cfb-fade-in space-y-4">
@@ -1441,7 +1500,7 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
         </button>
       </div>
 
-      {rows.length === 0 || rows.every((r) => r.weeksPlayed === 0 && !r.playoffCorrect) ? (
+      {isEmpty ? (
         <EmptyState title="No graded weeks yet" body="Standings fill in once the commissioner enters results for a week." />
       ) : (
         <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
@@ -1451,7 +1510,8 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
                 <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
                 <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
                 <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weekly</th>
-                {hasPlayoffPoints && <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>playoff</th>}
+                {hasWinTotals && <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>win totals</th>}
+                {hasPlayoff && <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>playoff</th>}
                 <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total</th>
                 <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weeks won</th>
               </tr>
@@ -1460,12 +1520,17 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
               {rows.map((r, i) => (
                 <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   <td className="px-3 py-2" style={{ color: i === 0 ? COLORS.gold : COLORS.muted }}>
-                    {i === 0 && r.correct > 0 ? <Trophy size={14} /> : i + 1}
+                    {i === 0 && r.totalWins > 0 ? <Trophy size={14} /> : i + 1}
                   </td>
                   <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
-                  <td className="px-3 py-2 text-right">{r.weeklyCorrect}</td>
-                  {hasPlayoffPoints && <td className="px-3 py-2 text-right">{r.playoffCorrect || 0}</td>}
-                  <td className="px-3 py-2 text-right font-bold">{r.correct}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{r.weeklyWins}-{r.weeklyLosses}</td>
+                  {hasWinTotals && (
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{r.winTotalsWins}-{r.winTotalsLosses}</td>
+                  )}
+                  {hasPlayoff && (
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{r.playoffWins}-{r.playoffLosses}</td>
+                  )}
+                  <td className="px-3 py-2 text-right font-bold whitespace-nowrap">{r.totalWins}-{r.totalLosses}</td>
                   <td className="px-3 py-2 text-right">{r.weeksWon}</td>
                 </tr>
               ))}
