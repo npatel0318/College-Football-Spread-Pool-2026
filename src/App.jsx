@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { storage } from "./storage";
+import { db } from "./firebase";
+import { collection, getDocs, writeBatch } from "firebase/firestore";
 import {
   Lock,
   Unlock,
@@ -555,6 +557,45 @@ export default function App() {
     return true;
   }
 
+  /* ---------- full reset (testing only) ---------- */
+
+  async function resetAllData() {
+    try {
+      const collectionsToWipe = ["weeks", "picks", "winTotalsBoards", "winTotalsPicks"];
+      for (const colName of collectionsToWipe) {
+        const snap = await getDocs(collection(db, colName));
+        if (snap.docs.length === 0) continue;
+        const batch = writeBatch(db);
+        snap.docs.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+      }
+      const freshMeta = { ...leagueMeta, members: [], weeks: [], winTotalsYears: [] };
+      const r = await storage.set("league-meta", JSON.stringify(freshMeta), true).catch(() => null);
+      if (!r) {
+        setError("Reset partially failed while resaving league info — check the Firebase console.");
+        return false;
+      }
+      setLeagueMeta(freshMeta);
+      setWeekCache({});
+      setPicksCache({});
+      setWinTotalsCache({});
+      setWinTotalsPicksCache({});
+      setStandings(null);
+      setSelectedWeek(null);
+      setSelectedWinTotalsYear(null);
+      await storage.delete("my-name", false).catch(() => null);
+      setMyName(null);
+      setCommishUnlocked(false);
+      setPasscodeInput("");
+      setActiveTab("picks");
+      setPhase("identify");
+      return true;
+    } catch (e) {
+      setError("Reset failed partway through — check the Firebase console to see what's left.");
+      return false;
+    }
+  }
+
   /* ---------- standings ---------- */
 
   const loadStandings = useCallback(async () => {
@@ -791,6 +832,7 @@ export default function App() {
             saveWinTotalsBoard={saveWinTotalsBoard}
             toggleWinTotalsLock={toggleWinTotalsLock}
             saveWinTotalsResults={saveWinTotalsResults}
+            resetAllData={resetAllData}
           />
         )}
       </div>
@@ -1218,9 +1260,13 @@ function CommishTab({
   saveWinTotalsBoard,
   toggleWinTotalsLock,
   saveWinTotalsResults,
+  resetAllData,
 }) {
   const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults
   const [editingWeek, setEditingWeek] = useState(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetConfirming, setResetConfirming] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   if (!commishUnlocked) {
     return (
@@ -1297,6 +1343,56 @@ function CommishTab({
           saveWinTotalsResults={saveWinTotalsResults}
         />
       )}
+
+      <div className="mt-6 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+        <button
+          onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
+          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5"
+          style={{ color: COLORS.redBright }}
+        >
+          <AlertCircle size={13} /> Danger zone (testing only)
+        </button>
+        {resetOpen && (
+          <div className="mt-3 p-3 space-y-3" style={{ background: "rgba(179,55,42,0.08)", border: `1px solid ${COLORS.red}` }}>
+            <div className="text-sm" style={{ color: COLORS.chalk }}>
+              This permanently deletes every member, every week's games and picks, and every win totals board and
+              pick. Your league name and commissioner passcode are kept, but everyone — including you — will need
+              to rejoin under a name afterward. Remove this button before opening the pool to real members.
+            </div>
+            {!resetConfirming ? (
+              <SecondaryButton
+                onClick={() => setResetConfirming(true)}
+                disabled={resetting}
+              >
+                Reset all data
+              </SecondaryButton>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-sm font-semibold" style={{ color: COLORS.redBright }}>
+                  Are you sure? This can't be undone.
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => {
+                      setResetting(true);
+                      await resetAllData();
+                      setResetting(false);
+                    }}
+                    disabled={resetting}
+                    className="cfb-mono cfb-btn text-xs font-bold uppercase tracking-wider px-3 py-2"
+                    style={{ background: COLORS.red, color: COLORS.chalk, border: `1px solid ${COLORS.red}`, opacity: resetting ? 0.6 : 1 }}
+                  >
+                    {resetting ? "Deleting everything..." : "Yes, delete everything"}
+                  </button>
+                  <SecondaryButton onClick={() => setResetConfirming(false)} disabled={resetting}>
+                    Cancel
+                  </SecondaryButton>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
