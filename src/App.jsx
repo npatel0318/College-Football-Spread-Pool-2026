@@ -22,6 +22,7 @@ import {
   ChevronUp,
   TrendingUp,
   Target,
+  Award,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -135,6 +136,39 @@ function winTotalCover(team) {
 
 function newWinTotalsTeam() {
   return { id: newId(), school: "", conference: "ACC", line: "" };
+}
+
+const PLAYOFF_SLOTS = [
+  { key: "tier1-1", label: "Tier 1, Pick 1", tier: 1 },
+  { key: "tier1-2", label: "Tier 1, Pick 2", tier: 1 },
+  { key: "tier1-3", label: "Tier 1, Pick 3", tier: 1 },
+  { key: "tier2-1", label: "Tier 2, Pick 1", tier: 2 },
+  { key: "tier2-2", label: "Tier 2, Pick 2", tier: 2 },
+  { key: "tier3-1", label: "Tier 3, Pick 1", tier: 3 },
+];
+
+function newPlayoffTeam() {
+  return { id: newId(), school: "", odds: "" };
+}
+
+// Splits teams into 3 roughly-even tiers by best (lowest positive) odds first.
+// Returns { tiersById: {teamId: 1|2|3}, tier1: [...], tier2: [...], tier3: [...] }
+function computePlayoffTiers(teams) {
+  const sorted = teams
+    .filter((t) => Number(t.odds) > 0)
+    .slice()
+    .sort((a, b) => Number(a.odds) - Number(b.odds));
+  const n = sorted.length;
+  const tier1Size = Math.ceil(n / 3);
+  const tier2Size = Math.ceil((n - tier1Size) / 2);
+  const tier1 = sorted.slice(0, tier1Size);
+  const tier2 = sorted.slice(tier1Size, tier1Size + tier2Size);
+  const tier3 = sorted.slice(tier1Size + tier2Size);
+  const tiersById = {};
+  tier1.forEach((t) => (tiersById[t.id] = 1));
+  tier2.forEach((t) => (tiersById[t.id] = 2));
+  tier3.forEach((t) => (tiersById[t.id] = 3));
+  return { tiersById, tier1, tier2, tier3 };
 }
 
 async function safeGet(key, shared) {
@@ -261,6 +295,11 @@ export default function App() {
   const [winTotalsPicksCache, setWinTotalsPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
   const [winTotalsLoading, setWinTotalsLoading] = useState(false);
 
+  const [selectedPlayoffYear, setSelectedPlayoffYear] = useState(null);
+  const [playoffCache, setPlayoffCache] = useState({}); // year -> {year, teams, locked}
+  const [playoffPicksCache, setPlayoffPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
+  const [playoffLoading, setPlayoffLoading] = useState(false);
+
   const [commishUnlocked, setCommishUnlocked] = useState(false);
   const [passcodeInput, setPasscodeInput] = useState("");
 
@@ -279,6 +318,8 @@ export default function App() {
           setSelectedWeek(latest);
           const wtYears = meta.winTotalsYears || [];
           setSelectedWinTotalsYear(wtYears.length ? Math.max(...wtYears) : null);
+          const pYears = meta.playoffYears || [];
+          setSelectedPlayoffYear(pYears.length ? Math.max(...pYears) : null);
         } else {
           setPhase("identify");
         }
@@ -303,6 +344,7 @@ export default function App() {
       commissionerPasscode: passcode,
       weeks: [],
       winTotalsYears: [],
+      playoffYears: [],
       createdAt: Date.now(),
     };
     const r = await storage.set("league-meta", JSON.stringify(meta), true).catch(() => null);
@@ -557,11 +599,105 @@ export default function App() {
     return true;
   }
 
+  /* ---------- playoff picks ---------- */
+
+  const loadPlayoff = useCallback(async (year, withPicks) => {
+    if (year == null) return;
+    setPlayoffLoading(true);
+    const raw = await safeGet(`playoff:${year}:board`, true);
+    const board = raw ? JSON.parse(raw) : null;
+    setPlayoffCache((prev) => ({ ...prev, [year]: board }));
+    if (withPicks) {
+      const list = await storage.list(`playoff:${year}:picks:`, true).catch(() => null);
+      const keys = list?.keys || [];
+      const picksObj = {};
+      for (const k of keys) {
+        const raw2 = await safeGet(k, true);
+        if (!raw2) continue;
+        const slug = k.slice(`playoff:${year}:picks:`.length);
+        picksObj[slug] = JSON.parse(raw2);
+      }
+      setPlayoffPicksCache((prev) => ({ ...prev, [year]: picksObj }));
+    }
+    setPlayoffLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (phase === "app" && selectedPlayoffYear != null && activeTab === "playoff") {
+      loadPlayoff(selectedPlayoffYear, true);
+    }
+  }, [phase, selectedPlayoffYear, activeTab, loadPlayoff]);
+
+  async function savePlayoffPicks(year, picks) {
+    const mySlug = slugify(myName);
+    const payload = { name: myName, picks, submittedAt: Date.now() };
+    const r = await storage
+      .set(`playoff:${year}:picks:${mySlug}`, JSON.stringify(payload), true)
+      .catch(() => null);
+    if (!r) {
+      setError("Your playoff picks didn't save — check your connection and try again.");
+      return false;
+    }
+    setPlayoffPicksCache((prev) => ({
+      ...prev,
+      [year]: { ...(prev[year] || {}), [mySlug]: payload },
+    }));
+    return true;
+  }
+
+  async function savePlayoffBoard(year, teams, locked) {
+    const existing = playoffCache[year];
+    let payload;
+    if (existing) {
+      const finalMap = {};
+      existing.teams.forEach((t) => (finalMap[t.id] = t.madePlayoff));
+      payload = {
+        year,
+        locked,
+        teams: teams.map((t) => ({ ...t, madePlayoff: finalMap[t.id] ?? null })),
+      };
+    } else {
+      payload = { year, locked, teams: teams.map((t) => ({ ...t, madePlayoff: null })) };
+    }
+    const r = await storage.set(`playoff:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't save the playoff board — try again.");
+      return false;
+    }
+    setPlayoffCache((prev) => ({ ...prev, [year]: payload }));
+    const existingYears = leagueMeta.playoffYears || [];
+    if (!existingYears.includes(year)) {
+      const updatedMeta = { ...leagueMeta, playoffYears: [...existingYears, year].sort((a, b) => a - b) };
+      await storage.set("league-meta", JSON.stringify(updatedMeta), true).catch(() => null);
+      setLeagueMeta(updatedMeta);
+    }
+    return true;
+  }
+
+  async function togglePlayoffLock(year) {
+    const board = playoffCache[year];
+    if (!board) return;
+    const payload = { ...board, locked: !board.locked };
+    const r = await storage.set(`playoff:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (r) setPlayoffCache((prev) => ({ ...prev, [year]: payload }));
+  }
+
+  async function savePlayoffResults(year, teamsWithMadePlayoff) {
+    const payload = { ...playoffCache[year], teams: teamsWithMadePlayoff };
+    const r = await storage.set(`playoff:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't save playoff results — try again.");
+      return false;
+    }
+    setPlayoffCache((prev) => ({ ...prev, [year]: payload }));
+    return true;
+  }
+
   /* ---------- full reset (testing only) ---------- */
 
   async function resetAllData() {
     try {
-      const collectionsToWipe = ["weeks", "picks", "winTotalsBoards", "winTotalsPicks"];
+      const collectionsToWipe = ["weeks", "picks", "winTotalsBoards", "winTotalsPicks", "playoffBoards", "playoffPicks"];
       for (const colName of collectionsToWipe) {
         const snap = await getDocs(collection(db, colName));
         if (snap.docs.length === 0) continue;
@@ -569,7 +705,7 @@ export default function App() {
         snap.docs.forEach((d) => batch.delete(d.ref));
         await batch.commit();
       }
-      const freshMeta = { ...leagueMeta, members: [], weeks: [], winTotalsYears: [] };
+      const freshMeta = { ...leagueMeta, members: [], weeks: [], winTotalsYears: [], playoffYears: [] };
       const r = await storage.set("league-meta", JSON.stringify(freshMeta), true).catch(() => null);
       if (!r) {
         setError("Reset partially failed while resaving league info — check the Firebase console.");
@@ -583,6 +719,9 @@ export default function App() {
       setStandings(null);
       setSelectedWeek(null);
       setSelectedWinTotalsYear(null);
+      setPlayoffCache({});
+      setPlayoffPicksCache({});
+      setSelectedPlayoffYear(null);
       await storage.delete("my-name", false).catch(() => null);
       setMyName(null);
       setCommishUnlocked(false);
@@ -602,7 +741,9 @@ export default function App() {
     if (!leagueMeta) return;
     setStandingsLoading(true);
     const results = {};
-    leagueMeta.members.forEach((m) => (results[m] = { correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} }));
+    leagueMeta.members.forEach(
+      (m) => (results[m] = { weeklyCorrect: 0, playoffCorrect: 0, correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} })
+    );
 
     for (const w of leagueMeta.weeks) {
       const raw = await safeGet(`week:${w}:games`, true);
@@ -623,8 +764,8 @@ export default function App() {
           const cover = coveringSide(g);
           if (cover && cover !== "push" && picksObj.picks[g.id] === cover) correct++;
         });
-        if (!results[member]) results[member] = { correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} };
-        results[member].correct += correct;
+        if (!results[member]) results[member] = { weeklyCorrect: 0, playoffCorrect: 0, correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} };
+        results[member].weeklyCorrect += correct;
         results[member].weeksPlayed += 1;
         results[member].breakdown[w] = correct;
         weekCorrect[member] = correct;
@@ -637,6 +778,39 @@ export default function App() {
         });
       }
     }
+
+    // Merge in playoff-picks scoring (most recent year) — counts toward the same total.
+    const playoffYears = leagueMeta.playoffYears || [];
+    if (playoffYears.length) {
+      const pYear = Math.max(...playoffYears);
+      const raw = await safeGet(`playoff:${pYear}:board`, true);
+      if (raw) {
+        const board = JSON.parse(raw);
+        const teamsById = {};
+        board.teams.forEach((t) => (teamsById[t.id] = t));
+        const list = await storage.list(`playoff:${pYear}:picks:`, true).catch(() => null);
+        const keys = list?.keys || [];
+        for (const k of keys) {
+          const raw2 = await safeGet(k, true);
+          if (!raw2) continue;
+          const picksObj = JSON.parse(raw2);
+          const member = picksObj.name;
+          if (!member) continue;
+          if (!results[member]) results[member] = { weeklyCorrect: 0, playoffCorrect: 0, correct: 0, weeksPlayed: 0, weeksWon: 0, breakdown: {} };
+          let correct = 0;
+          (picksObj.picks || []).forEach((p) => {
+            const team = teamsById[p.teamId];
+            if (team && team.madePlayoff === true) correct++;
+          });
+          results[member].playoffCorrect = correct;
+        }
+      }
+    }
+
+    Object.values(results).forEach((r) => {
+      r.correct = r.weeklyCorrect + r.playoffCorrect;
+    });
+
     setStandings(results);
     setStandingsLoading(false);
   }, [leagueMeta, slugToName]);
@@ -746,6 +920,7 @@ export default function App() {
           { id: "picks", label: "Picks", icon: CheckCircle2 },
           { id: "standings", label: "Standings", icon: Trophy },
           { id: "wintotals", label: "Win Totals", icon: Target },
+          { id: "playoff", label: "Playoff", icon: Award },
           { id: "commish", label: "Commish", icon: Shield },
         ].map((t) => {
           const Icon = t.icon;
@@ -808,6 +983,20 @@ export default function App() {
           />
         )}
 
+        {activeTab === "playoff" && (
+          <PlayoffTab
+            leagueMeta={leagueMeta}
+            selectedYear={selectedPlayoffYear}
+            setSelectedYear={setSelectedPlayoffYear}
+            board={selectedPlayoffYear != null ? playoffCache[selectedPlayoffYear] : null}
+            loading={playoffLoading}
+            picksCache={playoffPicksCache}
+            myName={myName}
+            savePlayoffPicks={savePlayoffPicks}
+            slugToName={slugToName}
+          />
+        )}
+
         {activeTab === "commish" && (
           <CommishTab
             leagueMeta={leagueMeta}
@@ -832,6 +1021,11 @@ export default function App() {
             saveWinTotalsBoard={saveWinTotalsBoard}
             toggleWinTotalsLock={toggleWinTotalsLock}
             saveWinTotalsResults={saveWinTotalsResults}
+            playoffCache={playoffCache}
+            loadPlayoff={loadPlayoff}
+            savePlayoffBoard={savePlayoffBoard}
+            togglePlayoffLock={togglePlayoffLock}
+            savePlayoffResults={savePlayoffResults}
             resetAllData={resetAllData}
           />
         )}
@@ -1199,6 +1393,7 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
     .sort((a, b) => b.correct - a.correct);
 
   const gradedWeeks = leagueMeta.weeks.length;
+  const hasPlayoffPoints = rows.some((r) => r.playoffCorrect > 0);
 
   return (
     <div className="cfb-fade-in space-y-4">
@@ -1209,7 +1404,7 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
         </button>
       </div>
 
-      {rows.length === 0 || rows.every((r) => r.weeksPlayed === 0) ? (
+      {rows.length === 0 || rows.every((r) => r.weeksPlayed === 0 && !r.playoffCorrect) ? (
         <EmptyState title="No graded weeks yet" body="Standings fill in once the commissioner enters results for a week." />
       ) : (
         <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
@@ -1218,7 +1413,9 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
               <tr style={{ background: COLORS.fieldDeep }}>
                 <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
                 <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
-                <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>correct</th>
+                <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weekly</th>
+                {hasPlayoffPoints && <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>playoff</th>}
+                <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total</th>
                 <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weeks won</th>
               </tr>
             </thead>
@@ -1229,7 +1426,9 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
                     {i === 0 && r.correct > 0 ? <Trophy size={14} /> : i + 1}
                   </td>
                   <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
-                  <td className="px-3 py-2 text-right">{r.correct}</td>
+                  <td className="px-3 py-2 text-right">{r.weeklyCorrect}</td>
+                  {hasPlayoffPoints && <td className="px-3 py-2 text-right">{r.playoffCorrect || 0}</td>}
+                  <td className="px-3 py-2 text-right font-bold">{r.correct}</td>
                   <td className="px-3 py-2 text-right">{r.weeksWon}</td>
                 </tr>
               ))}
@@ -1260,9 +1459,14 @@ function CommishTab({
   saveWinTotalsBoard,
   toggleWinTotalsLock,
   saveWinTotalsResults,
+  playoffCache,
+  loadPlayoff,
+  savePlayoffBoard,
+  togglePlayoffLock,
+  savePlayoffResults,
   resetAllData,
 }) {
-  const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults
+  const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults
   const [editingWeek, setEditingWeek] = useState(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetConfirming, setResetConfirming] = useState(false);
@@ -1305,6 +1509,12 @@ function CommishTab({
         <SecondaryButton onClick={() => setMode("wtResults")} disabled={mode === "wtResults"}>
           Win totals results
         </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("pBoard")} disabled={mode === "pBoard"}>
+          Playoff board
+        </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("pResults")} disabled={mode === "pResults"}>
+          Playoff results
+        </SecondaryButton>
       </div>
 
       <div className="text-sm flex items-center gap-1.5" style={{ color: COLORS.chalkDim }}>
@@ -1344,6 +1554,25 @@ function CommishTab({
         />
       )}
 
+      {mode === "pBoard" && (
+        <PlayoffBoardManager
+          leagueMeta={leagueMeta}
+          playoffCache={playoffCache}
+          loadPlayoff={loadPlayoff}
+          savePlayoffBoard={savePlayoffBoard}
+          togglePlayoffLock={togglePlayoffLock}
+        />
+      )}
+
+      {mode === "pResults" && (
+        <PlayoffResultsManager
+          leagueMeta={leagueMeta}
+          playoffCache={playoffCache}
+          loadPlayoff={loadPlayoff}
+          savePlayoffResults={savePlayoffResults}
+        />
+      )}
+
       <div className="mt-6 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
         <button
           onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
@@ -1355,9 +1584,10 @@ function CommishTab({
         {resetOpen && (
           <div className="mt-3 p-3 space-y-3" style={{ background: "rgba(179,55,42,0.08)", border: `1px solid ${COLORS.red}` }}>
             <div className="text-sm" style={{ color: COLORS.chalk }}>
-              This permanently deletes every member, every week's games and picks, and every win totals board and
-              pick. Your league name and commissioner passcode are kept, but everyone — including you — will need
-              to rejoin under a name afterward. Remove this button before opening the pool to real members.
+              This permanently deletes every member, every week's games and picks, every win totals board and
+              pick, and every playoff board and pick. Your league name and commissioner passcode are kept, but
+              everyone — including you — will need to rejoin under a name afterward. Remove this button before
+              opening the pool to real members.
             </div>
             {!resetConfirming ? (
               <SecondaryButton
@@ -2814,6 +3044,583 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
                 finalWins: finals[t.id] === "" || finals[t.id] == null ? null : Number(finals[t.id]),
               }));
               await saveWinTotalsResults(selectedYear, teamsWithFinal);
+              setBusy(false);
+            }}
+          >
+            {busy ? "Saving..." : "Save results"}
+          </PrimaryButton>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------- playoff tab -------------------------------- */
+
+function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading, picksCache, myName, savePlayoffPicks, slugToName }) {
+  const mySlug = slugify(myName);
+  const [selections, setSelections] = useState({}); // slotKey -> teamId
+  const [saving, setSaving] = useState(false);
+  const [loadedExisting, setLoadedExisting] = useState(false);
+
+  useEffect(() => {
+    setLoadedExisting(false);
+    setSelections({});
+  }, [selectedYear]);
+
+  useEffect(() => {
+    if (!loadedExisting && board && picksCache[selectedYear]) {
+      const mine = picksCache[selectedYear][mySlug];
+      if (mine) {
+        const sel = {};
+        (mine.picks || []).forEach((p) => {
+          sel[p.slotKey] = p.teamId;
+        });
+        setSelections(sel);
+      }
+      setLoadedExisting(true);
+    }
+  }, [board, picksCache, selectedYear, mySlug, loadedExisting]);
+
+  const years = leagueMeta.playoffYears || [];
+
+  if (years.length === 0) {
+    return (
+      <EmptyState
+        title="No playoff board yet"
+        body="The commissioner hasn't set up playoff picks. Check back once they do."
+      />
+    );
+  }
+
+  if (selectedYear == null) return <Spinner label="Loading..." />;
+  if (loading && !board) return <Spinner label="Loading playoff board..." />;
+  if (!board) return <EmptyState title={`${selectedYear} board not found`} body="This board may have been removed." />;
+
+  const { tiersById, tier1, tier2, tier3 } = computePlayoffTiers(board.teams);
+  const teamsById = {};
+  board.teams.forEach((t) => (teamsById[t.id] = t));
+
+  const usedTeamIds = new Set(Object.values(selections).filter(Boolean));
+
+  function updateSlot(slotKey, teamId) {
+    setSelections((prev) => ({ ...prev, [slotKey]: teamId || null }));
+  }
+
+  function tierOptions(tier) {
+    if (tier === 1) return tier1;
+    if (tier === 2) return tier2;
+    return tier3;
+  }
+
+  const allFilled = PLAYOFF_SLOTS.every((s) => selections[s.key]);
+  const tierOk = PLAYOFF_SLOTS.filter((s) => s.tier).every((s) => {
+    const teamId = selections[s.key];
+    if (!teamId) return false;
+    return tiersById[teamId] === s.tier;
+  });
+  const noDuplicates = (() => {
+    const ids = PLAYOFF_SLOTS.map((s) => selections[s.key]).filter(Boolean);
+    return new Set(ids).size === ids.length;
+  })();
+  const canSubmit = allFilled && tierOk && noDuplicates;
+
+  const picksForYear = picksCache[selectedYear] || {};
+  const submittedCount = Object.values(picksForYear).filter((v) => v && (v.picks || []).length > 0).length;
+
+  return (
+    <div className="cfb-fade-in space-y-4">
+      {years.length > 1 && (
+        <div className="flex items-center gap-2 overflow-x-auto cfb-scroll pb-1">
+          {years
+            .slice()
+            .sort((a, b) => a - b)
+            .map((y) => (
+              <button
+                key={y}
+                onClick={() => setSelectedYear(y)}
+                className="cfb-mono cfb-btn text-xs font-bold px-3 py-2 flex-shrink-0"
+                style={{
+                  background: selectedYear === y ? COLORS.gold : "transparent",
+                  color: selectedYear === y ? COLORS.ink : COLORS.chalkDim,
+                  border: `1px solid ${selectedYear === y ? COLORS.gold : COLORS.lineStrong}`,
+                }}
+              >
+                {y}
+              </button>
+            ))}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <div className="cfb-display text-xl uppercase">{selectedYear} Playoff Picks</div>
+        {board.locked ? (
+          <span className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.muted }}>
+            <Lock size={12} /> locked
+          </span>
+        ) : (
+          <span className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.goldBright }}>
+            <Unlock size={12} /> open
+          </span>
+        )}
+      </div>
+
+      {!board.locked && (
+        <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+          Pick 3 teams from Tier 1, 2 from Tier 2, and 1 from Tier 3. Correct picks count
+          toward your total on the Standings tab. {submittedCount} of {leagueMeta.members.length} have submitted picks.
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {PLAYOFF_SLOTS.map((slot) => {
+          const teamId = selections[slot.key];
+          const team = teamId ? teamsById[teamId] : null;
+          const options = tierOptions(slot.tier).filter((t) => !usedTeamIds.has(t.id) || t.id === teamId);
+          const disabled = board.locked;
+          let resultColor = null;
+          if (team && team.madePlayoff != null) {
+            resultColor = team.madePlayoff ? COLORS.goldBright : COLORS.redBright;
+          }
+          return (
+            <div key={slot.key} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+              <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.gold }}>{slot.label}</div>
+              <select
+                disabled={disabled}
+                value={teamId || ""}
+                onChange={(e) => updateSlot(slot.key, e.target.value || null)}
+                className="cfb-mono text-base sm:text-sm px-2 py-2.5 sm:py-2 w-full"
+                style={{
+                  background: COLORS.fieldDark,
+                  color: resultColor || COLORS.chalk,
+                  border: `1px solid ${resultColor || COLORS.lineStrong}`,
+                }}
+              >
+                <option value="">Select a team...</option>
+                {options.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.school} (+{t.odds})
+                  </option>
+                ))}
+              </select>
+              {team && team.madePlayoff != null && (
+                <div className="cfb-mono text-xs mt-1.5" style={{ color: resultColor }}>
+                  {team.madePlayoff ? "made the playoff" : "did not make it"}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {!board.locked && (
+        <>
+          <PrimaryButton
+            full
+            disabled={!canSubmit || saving}
+            onClick={async () => {
+              setSaving(true);
+              const picks = PLAYOFF_SLOTS.map((s) => ({ slotKey: s.key, teamId: selections[s.key] }));
+              await savePlayoffPicks(selectedYear, picks);
+              setSaving(false);
+            }}
+          >
+            {saving ? "Saving..." : "Save my picks"}
+          </PrimaryButton>
+          {!canSubmit && (
+            <div className="text-xs" style={{ color: COLORS.muted }}>
+              Fill all 6 picks (3 from Tier 1, 2 from Tier 2, 1 from Tier 3) with no repeated teams to save.
+            </div>
+          )}
+        </>
+      )}
+
+      {board.locked && (
+        <>
+          <PlayoffGrid leagueMeta={leagueMeta} board={board} picksCache={picksForYear} slugToName={slugToName} />
+          <div className="text-xs" style={{ color: COLORS.muted }}>
+            Correct picks count toward your total on the Standings tab.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PlayoffGrid({ leagueMeta, board, picksCache, slugToName }) {
+  const teamsById = {};
+  board.teams.forEach((t) => (teamsById[t.id] = t));
+  const members = leagueMeta.members;
+  return (
+    <div className="mt-2">
+      <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.chalkDim }}>
+        Everyone's picks
+      </div>
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th className="text-left px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDeep, color: COLORS.chalkDim }}>
+                slot
+              </th>
+              {members.map((m) => (
+                <th key={m} className="text-left px-2 py-1.5 whitespace-nowrap" style={{ background: COLORS.fieldDeep, color: COLORS.chalkDim }}>
+                  {m}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {PLAYOFF_SLOTS.map((slot) => (
+              <tr key={slot.key} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
+                  {slot.label}
+                </td>
+                {members.map((m) => {
+                  const slugM = slugify(m);
+                  const pdoc = picksCache[slugM];
+                  const pick = (pdoc?.picks || []).find((p) => p.slotKey === slot.key);
+                  const team = pick ? teamsById[pick.teamId] : null;
+                  const label = team ? `${team.school} (+${team.odds})` : "—";
+                  let color = COLORS.chalkDim;
+                  if (team && team.madePlayoff != null) color = team.madePlayoff ? COLORS.goldBright : COLORS.redBright;
+                  return (
+                    <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
+                      {label}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- playoff commissioner --------------------------- */
+
+function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayoffBoard, togglePlayoffLock }) {
+  const years = leagueMeta.playoffYears || [];
+  const [selectedYear, setSelectedYear] = useState(null);
+  const [yearInput, setYearInput] = useState(String(defaultWinTotalsYear()));
+  const [teams, setTeams] = useState([]);
+  const [loadedExisting, setLoadedExisting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importError, setImportError] = useState(null);
+  const [importNotice, setImportNotice] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
+
+  useEffect(() => {
+    if (selectedYear != null && !playoffCache[selectedYear]) {
+      loadPlayoff(selectedYear, false);
+    } else if (selectedYear != null && playoffCache[selectedYear] && !loadedExisting) {
+      setTeams(playoffCache[selectedYear].teams.map((t) => ({ ...t, odds: String(t.odds) })));
+      setYearInput(String(selectedYear));
+      setLoadedExisting(true);
+    }
+  }, [selectedYear, playoffCache, loadPlayoff, loadedExisting]);
+
+  function startNew() {
+    setSelectedYear(null);
+    setLoadedExisting(false);
+    setTeams([]);
+    setYearInput(String(defaultWinTotalsYear()));
+  }
+  function startEdit(y) {
+    setLoadedExisting(false);
+    setSelectedYear(y);
+  }
+
+  function updateTeam(idx, patch) {
+    setTeams((prev) => prev.map((t, i) => (i === idx ? { ...t, ...patch } : t)));
+  }
+  function addRow() {
+    setTeams((prev) => [...prev, newPlayoffTeam()]);
+  }
+  function removeRow(idx) {
+    setTeams((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function handleParseImport() {
+    setImportError(null);
+    setImportNotice(null);
+    let data;
+    try {
+      data = JSON.parse(importText);
+    } catch (e) {
+      setImportError("That doesn't look like valid JSON. Make sure you copied the whole list, brackets included.");
+      return;
+    }
+    if (!Array.isArray(data)) {
+      setImportError("Expected a JSON array of teams.");
+      return;
+    }
+    try {
+      const existingByName = {};
+      teams.forEach((t) => {
+        existingByName[normalizeTeam(t.school)] = t.id;
+      });
+      let excludedCount = 0;
+      const cleaned = [];
+      data.forEach((t, i) => {
+        if (!t.school || t.odds == null || isNaN(Number(t.odds))) {
+          throw new Error(`Entry ${i + 1} is missing a school name or numeric odds.`);
+        }
+        const odds = Number(t.odds);
+        if (odds <= 0) {
+          excludedCount++;
+          return;
+        }
+        const existingId = existingByName[normalizeTeam(t.school)];
+        cleaned.push({ id: existingId || newId(), school: String(t.school), odds: String(odds) });
+      });
+      setTeams(cleaned);
+      setImportText("");
+      setImportOpen(false);
+      if (excludedCount > 0) {
+        setImportNotice(
+          `Excluded ${excludedCount} team${excludedCount === 1 ? "" : "s"} with negative odds (favorites aren't pick-able).`
+        );
+      }
+    } catch (e) {
+      setImportError(e.message);
+    }
+  }
+
+  const currentBoard = selectedYear != null ? playoffCache[selectedYear] : null;
+  const valid =
+    yearInput.trim() &&
+    !isNaN(Number(yearInput)) &&
+    teams.length >= 7 &&
+    teams.every((t) => t.school.trim() && t.odds !== "" && !isNaN(Number(t.odds)) && Number(t.odds) > 0);
+
+  const { tier1, tier2, tier3 } = computePlayoffTiers(
+    teams.map((t) => ({ ...t, odds: Number(t.odds) })).filter((t) => !isNaN(t.odds))
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        <SecondaryButton onClick={startNew} disabled={selectedYear === null}>
+          <span className="flex items-center gap-1"><Plus size={12} /> new board</span>
+        </SecondaryButton>
+        {years
+          .slice()
+          .sort((a, b) => b - a)
+          .map((y) => (
+            <SecondaryButton key={y} onClick={() => startEdit(y)} disabled={selectedYear === y}>
+              edit {y}
+            </SecondaryButton>
+          ))}
+      </div>
+
+      {selectedYear != null && currentBoard && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span style={{ color: COLORS.chalkDim }}>{selectedYear} board is currently</span>
+          <button
+            onClick={() => togglePlayoffLock(selectedYear)}
+            className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2 flex items-center gap-1"
+            style={{
+              background: currentBoard.locked ? "rgba(179,55,42,0.16)" : "rgba(217,164,65,0.16)",
+              border: `1px solid ${currentBoard.locked ? COLORS.red : COLORS.gold}`,
+              color: currentBoard.locked ? COLORS.redBright : COLORS.goldBright,
+            }}
+          >
+            {currentBoard.locked ? <Lock size={12} /> : <Unlock size={12} />}
+            {currentBoard.locked ? "locked — click to open" : "open — click to lock"}
+          </button>
+        </div>
+      )}
+
+      <div>
+        <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>
+          Season year
+        </div>
+        <div style={{ maxWidth: 120 }}>
+          <FieldInput type="number" value={yearInput} onChange={setYearInput} disabled={selectedYear != null} />
+        </div>
+      </div>
+
+      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
+        <button
+          onClick={() => setImportOpen((o) => !o)}
+          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5 w-full"
+          style={{ color: COLORS.goldBright }}
+        >
+          <Upload size={13} /> Paste playoff odds list
+          <span className="flex-1" />
+          {importOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        </button>
+        {importOpen && (
+          <div className="mt-3 space-y-2">
+            <div className="text-xs" style={{ color: COLORS.chalkDim }}>
+              Ask me in chat for this year's "to make the playoff" odds, then paste the list here. Teams with
+              negative odds are automatically excluded. This replaces the team list below — review it before saving.
+            </div>
+            <textarea
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              rows={5}
+              className="cfb-mono text-base sm:text-xs w-full p-2"
+              style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
+              placeholder='[{"school":"Ohio State","odds":150}, {"school":"Boise State","odds":900}]'
+            />
+            {importError && <Banner onDismiss={() => setImportError(null)}>{importError}</Banner>}
+            <SecondaryButton onClick={handleParseImport} disabled={!importText.trim()}>
+              Load list
+            </SecondaryButton>
+          </div>
+        )}
+        {importNotice && (
+          <div className="text-xs mt-2" style={{ color: COLORS.muted }}>
+            {importNotice}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        {teams.map((t, idx) => (
+          <div key={t.id} className="flex items-center gap-2 px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+            <div className="flex-1">
+              <FieldInput value={t.school} onChange={(v) => updateTeam(idx, { school: v })} placeholder="School" />
+            </div>
+            <div style={{ width: 90, flexShrink: 0 }}>
+              <FieldInput type="number" value={t.odds} onChange={(v) => updateTeam(idx, { odds: v })} placeholder="+odds" />
+            </div>
+            <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <SecondaryButton onClick={addRow}>
+        <span className="flex items-center gap-1"><Plus size={12} /> add team</span>
+      </SecondaryButton>
+
+      {teams.length > 0 && (
+        <div className="px-3 py-3 text-xs space-y-1.5" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}`, color: COLORS.chalkDim }}>
+          <div className="cfb-mono uppercase mb-1" style={{ color: COLORS.gold }}>
+            Tier preview (auto-computed from odds)
+          </div>
+          <div><span style={{ color: COLORS.chalk }}>Tier 1</span> ({tier1.length}): {tier1.map((t) => t.school).join(", ") || "—"}</div>
+          <div><span style={{ color: COLORS.chalk }}>Tier 2</span> ({tier2.length}): {tier2.map((t) => t.school).join(", ") || "—"}</div>
+          <div><span style={{ color: COLORS.chalk }}>Tier 3</span> ({tier3.length}): {tier3.map((t) => t.school).join(", ") || "—"}</div>
+        </div>
+      )}
+
+      <PrimaryButton
+        full
+        disabled={!valid || busy}
+        onClick={async () => {
+          setBusy(true);
+          const yr = Number(yearInput);
+          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), odds: Number(t.odds) }));
+          const ok = await savePlayoffBoard(yr, cleanTeams, currentBoard?.locked || false);
+          setBusy(false);
+          if (ok) setSelectedYear(yr);
+        }}
+      >
+        {busy ? "Saving..." : selectedYear != null ? "Save changes" : "Create board"}
+      </PrimaryButton>
+      {!valid && teams.length > 0 && teams.length < 7 && (
+        <div className="text-xs" style={{ color: COLORS.muted }}>
+          Add at least 7 teams — Tier 1 needs 3, and an even three-way split only gives Tier 1 enough teams once
+          there are 7 or more total.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PlayoffResultsManager({ leagueMeta, playoffCache, loadPlayoff, savePlayoffResults }) {
+  const years = leagueMeta.playoffYears || [];
+  const [selectedYear, setSelectedYear] = useState(years.length ? Math.max(...years) : null);
+  const [statuses, setStatuses] = useState({}); // teamId -> "yes" | "no" | ""
+  const [busy, setBusy] = useState(false);
+  const board = selectedYear != null ? playoffCache[selectedYear] : null;
+
+  useEffect(() => {
+    if (selectedYear != null && !playoffCache[selectedYear]) loadPlayoff(selectedYear, false);
+  }, [selectedYear, playoffCache, loadPlayoff]);
+
+  useEffect(() => {
+    if (board) {
+      const init = {};
+      board.teams.forEach((t) => {
+        init[t.id] = t.madePlayoff === true ? "yes" : t.madePlayoff === false ? "no" : "";
+      });
+      setStatuses(init);
+    }
+  }, [board?.year]);
+
+  if (!years.length) {
+    return <EmptyState title="No playoff board yet" body="Set one up under Playoff board first." />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        {years
+          .slice()
+          .sort((a, b) => b - a)
+          .map((y) => (
+            <SecondaryButton key={y} onClick={() => setSelectedYear(y)} disabled={selectedYear === y}>
+              {y}
+            </SecondaryButton>
+          ))}
+      </div>
+
+      {!board && <Spinner label="Loading board..." />}
+
+      {board && (
+        <>
+          <div className="text-xs" style={{ color: COLORS.muted }}>
+            Mark each team yes/no once the playoff field is announced. Picks grade automatically into the main
+            standings total.
+          </div>
+          <div className="space-y-2">
+            {board.teams.map((t) => (
+              <div key={t.id} className="flex items-center gap-2 px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+                <span className="text-sm flex-1 truncate">
+                  {t.school}{" "}
+                  <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                    (+{t.odds})
+                  </span>
+                </span>
+                <div className="flex gap-1.5 flex-shrink-0">
+                  {["yes", "no"].map((opt) => (
+                    <button
+                      key={opt}
+                      onClick={() => setStatuses((p) => ({ ...p, [t.id]: opt }))}
+                      className="cfb-mono cfb-btn text-xs font-semibold px-2.5 py-2 capitalize"
+                      style={{
+                        background:
+                          statuses[t.id] === opt ? (opt === "yes" ? "rgba(217,164,65,0.18)" : "rgba(179,55,42,0.18)") : "transparent",
+                        border: `1px solid ${statuses[t.id] === opt ? (opt === "yes" ? COLORS.gold : COLORS.red) : COLORS.lineStrong}`,
+                        color: statuses[t.id] === opt ? (opt === "yes" ? COLORS.goldBright : COLORS.redBright) : COLORS.chalkDim,
+                      }}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <PrimaryButton
+            full
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              const teamsWithResult = board.teams.map((t) => ({
+                ...t,
+                madePlayoff: statuses[t.id] === "yes" ? true : statuses[t.id] === "no" ? false : null,
+              }));
+              await savePlayoffResults(selectedYear, teamsWithResult);
               setBusy(false);
             }}
           >

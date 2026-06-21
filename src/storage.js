@@ -43,6 +43,17 @@ function parseSharedKey(key) {
       slug: m[2],
     };
   }
+  m = key.match(/^playoff:(\d+):board$/);
+  if (m) return { collection: "playoffBoards", id: m[1] };
+  m = key.match(/^playoff:(\d+):picks:(.+)$/);
+  if (m) {
+    return {
+      collection: "playoffPicks",
+      id: `${m[1]}_${m[2]}`,
+      pYear: Number(m[1]),
+      slug: m[2],
+    };
+  }
   throw new Error(`Unrecognized storage key: ${key}`);
 }
 
@@ -71,6 +82,10 @@ export const storage = {
     }
     if (parsed.wtYear != null) {
       payload.wtYear = parsed.wtYear;
+      payload.slug = parsed.slug;
+    }
+    if (parsed.pYear != null) {
+      payload.pYear = parsed.pYear;
       payload.slug = parsed.slug;
     }
     await setDoc(doc(db, parsed.collection, parsed.id), payload);
@@ -112,6 +127,15 @@ export const storage = {
         query(collection(db, "winTotalsPicks"), where("wtYear", "==", wtYear))
       );
       const keys = snap.docs.map((d) => `wintotals:${wtYear}:picks:${d.data().slug}`);
+      return { keys, prefix, shared: true };
+    }
+    m = prefix.match(/^playoff:(\d+):picks:$/);
+    if (m) {
+      const pYear = Number(m[1]);
+      const snap = await getDocs(
+        query(collection(db, "playoffPicks"), where("pYear", "==", pYear))
+      );
+      const keys = snap.docs.map((d) => `playoff:${pYear}:picks:${d.data().slug}`);
       return { keys, prefix, shared: true };
     }
     return { keys: [], prefix, shared: true };
