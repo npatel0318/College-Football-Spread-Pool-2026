@@ -25,6 +25,8 @@ import {
   Award,
   Flame,
   DollarSign,
+  Send,
+  Copy,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -2052,6 +2054,9 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const [oddsBusy, setOddsBusy] = useState(false);
   const [oddsError, setOddsError] = useState(null);
 
+  const [shareMessage, setShareMessage] = useState("");
+  const [shareCopied, setShareCopied] = useState(false);
+
   useEffect(() => {
     (async () => {
       const raw = await safeGet("odds-api-key", false);
@@ -2375,6 +2380,17 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
 
   const currentWeekData = selectedWeek != null ? weekCache[selectedWeek] : null;
 
+  useEffect(() => {
+    if (selectedWeek != null && currentWeekData) {
+      const url = typeof window !== "undefined" ? window.location.origin + window.location.pathname : "";
+      setShareMessage(
+        `🏈 Week ${selectedWeek} picks are live! ${currentWeekData.games.length} games to pick — get your picks in before kickoff.\n${url}`
+      );
+      setShareCopied(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWeek, currentWeekData?.games?.length]);
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
@@ -2406,6 +2422,43 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
             {currentWeekData.locked ? <Lock size={12} /> : <Unlock size={12} />}
             {currentWeekData.locked ? "locked — click to open" : "open — click to lock"}
           </button>
+        </div>
+      )}
+
+      {selectedWeek != null && currentWeekData && (
+        <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
+          <div className="cfb-mono text-xs uppercase tracking-wider mb-2 flex items-center gap-1.5" style={{ color: COLORS.goldBright }}>
+            <Send size={13} /> Share this week
+          </div>
+          <textarea
+            value={shareMessage}
+            onChange={(e) => {
+              setShareMessage(e.target.value);
+              setShareCopied(false);
+            }}
+            rows={4}
+            className="cfb-mono text-base sm:text-xs w-full p-2"
+            style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
+          />
+          <div className="mt-2">
+            <SecondaryButton
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(shareMessage);
+                  setShareCopied(true);
+                } catch (e) {
+                  setShareCopied(false);
+                }
+              }}
+            >
+              <span className="flex items-center gap-1.5">
+                <Copy size={12} /> {shareCopied ? "Copied!" : "Copy message"}
+              </span>
+            </SecondaryButton>
+          </div>
+          <div className="text-xs mt-2" style={{ color: COLORS.muted }}>
+            Edit the wording if you want, then paste it into your group text.
+          </div>
         </div>
       )}
 
