@@ -1176,11 +1176,11 @@ export default function App() {
       {/* tab nav */}
       <div className="flex" style={{ background: COLORS.fieldDark, borderBottom: `1px solid ${COLORS.line}` }}>
         {[
+          { id: "money", label: "Money", icon: DollarSign },
+          { id: "playoff", label: "Playoff", icon: Award },
+          { id: "wintotals", label: "Win Totals", icon: Target },
           { id: "picks", label: "Picks", icon: CheckCircle2 },
           { id: "standings", label: "Standings", icon: Trophy },
-          { id: "wintotals", label: "Win Totals", icon: Target },
-          { id: "playoff", label: "Playoff", icon: Award },
-          { id: "money", label: "Money", icon: DollarSign },
           { id: "commish", label: "Commish", icon: Shield },
         ].map((t) => {
           const Icon = t.icon;
@@ -4041,12 +4041,11 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
   const rows = leagueMeta.members
     .map((name) => {
       const m = moneyData.perMember[name] || { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0 };
-      const buyIn = -settings.buyIn;
       const weeklyNet = m.weeklyWin - m.weeklyLoss;
       const lockNet = m.lockWin - m.lockLoss;
       const seasonPayout = leagueMeta.seasonFinalized ? leagueMeta.seasonPayouts?.[name] || 0 : 0;
-      const total = buyIn + weeklyNet + lockNet + seasonPayout;
-      return { name, buyIn, weeklyNet, lockNet, seasonPayout, total };
+      const total = weeklyNet + lockNet + seasonPayout;
+      return { name, weeklyNet, lockNet, seasonPayout, total };
     })
     .sort((a, b) => b.total - a.total);
 
@@ -4092,7 +4091,6 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
           <thead>
             <tr style={{ background: COLORS.fieldDeep }}>
               <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
-              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>buy-in</th>
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weekly</th>
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>lock</th>
               {leagueMeta.seasonFinalized && (
@@ -4105,7 +4103,6 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
             {rows.map((r) => (
               <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                 <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
-                <td className="px-3 py-2 text-right" style={{ color: COLORS.redBright }}>{fmtMoney(r.buyIn)}</td>
                 <td
                   className="px-3 py-2 text-right"
                   style={{ color: r.weeklyNet > 0 ? COLORS.goldBright : r.weeklyNet < 0 ? COLORS.redBright : COLORS.chalkDim }}
