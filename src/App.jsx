@@ -19,6 +19,7 @@ import {
   ChevronDown,
   ChevronUp,
   TrendingUp,
+  Target,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -102,6 +103,36 @@ function defaultCfbdSeasonYear() {
 
 function isoDateInput(d) {
   return d.toISOString().slice(0, 10);
+}
+
+const P4_CONFERENCES = ["ACC", "Big Ten", "Big 12", "SEC"];
+
+function normalizeConf(c) {
+  const s = (c || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (s === "acc") return "ACC";
+  if (s === "sec") return "SEC";
+  if (s === "bigten" || s === "big10" || s === "b1g") return "Big Ten";
+  if (s === "big12" || s === "bigtwelve") return "Big 12";
+  return c || "";
+}
+
+function defaultWinTotalsYear() {
+  const now = new Date();
+  // Win total lines post in spring/summer for the upcoming season; in January
+  // the prior season's board is usually still the relevant one.
+  return now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+}
+
+// 'over' | 'under' | 'push' | null (null = not yet graded)
+function winTotalCover(team) {
+  if (team.finalWins == null) return null;
+  if (team.finalWins > team.line) return "over";
+  if (team.finalWins < team.line) return "under";
+  return "push";
+}
+
+function newWinTotalsTeam() {
+  return { id: newId(), school: "", conference: "ACC", line: "" };
 }
 
 async function safeGet(key, shared) {
@@ -223,6 +254,11 @@ export default function App() {
   const [standings, setStandings] = useState(null);
   const [standingsLoading, setStandingsLoading] = useState(false);
 
+  const [selectedWinTotalsYear, setSelectedWinTotalsYear] = useState(null);
+  const [winTotalsCache, setWinTotalsCache] = useState({}); // year -> {year, teams, locked}
+  const [winTotalsPicksCache, setWinTotalsPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
+  const [winTotalsLoading, setWinTotalsLoading] = useState(false);
+
   const [commishUnlocked, setCommishUnlocked] = useState(false);
   const [passcodeInput, setPasscodeInput] = useState("");
 
@@ -239,6 +275,8 @@ export default function App() {
           setPhase("app");
           const latest = meta.weeks.length ? Math.max(...meta.weeks) : null;
           setSelectedWeek(latest);
+          const wtYears = meta.winTotalsYears || [];
+          setSelectedWinTotalsYear(wtYears.length ? Math.max(...wtYears) : null);
         } else {
           setPhase("identify");
         }
@@ -262,6 +300,7 @@ export default function App() {
       members: [yourName.trim()],
       commissionerPasscode: passcode,
       weeks: [],
+      winTotalsYears: [],
       createdAt: Date.now(),
     };
     const r = await storage.set("league-meta", JSON.stringify(meta), true).catch(() => null);
@@ -422,6 +461,100 @@ export default function App() {
     return true;
   }
 
+  /* ---------- win totals ---------- */
+
+  const loadWinTotals = useCallback(async (year, withPicks) => {
+    if (year == null) return;
+    setWinTotalsLoading(true);
+    const raw = await safeGet(`wintotals:${year}:board`, true);
+    const board = raw ? JSON.parse(raw) : null;
+    setWinTotalsCache((prev) => ({ ...prev, [year]: board }));
+    if (withPicks) {
+      const list = await storage.list(`wintotals:${year}:picks:`, true).catch(() => null);
+      const keys = list?.keys || [];
+      const picksObj = {};
+      for (const k of keys) {
+        const raw2 = await safeGet(k, true);
+        if (!raw2) continue;
+        const slug = k.slice(`wintotals:${year}:picks:`.length);
+        picksObj[slug] = JSON.parse(raw2);
+      }
+      setWinTotalsPicksCache((prev) => ({ ...prev, [year]: picksObj }));
+    }
+    setWinTotalsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (phase === "app" && selectedWinTotalsYear != null && activeTab === "wintotals") {
+      loadWinTotals(selectedWinTotalsYear, true);
+    }
+  }, [phase, selectedWinTotalsYear, activeTab, loadWinTotals]);
+
+  async function saveWinTotalsPicks(year, picks) {
+    const mySlug = slugify(myName);
+    const payload = { name: myName, picks, submittedAt: Date.now() };
+    const r = await storage
+      .set(`wintotals:${year}:picks:${mySlug}`, JSON.stringify(payload), true)
+      .catch(() => null);
+    if (!r) {
+      setError("Your win total picks didn't save — check your connection and try again.");
+      return false;
+    }
+    setWinTotalsPicksCache((prev) => ({
+      ...prev,
+      [year]: { ...(prev[year] || {}), [mySlug]: payload },
+    }));
+    return true;
+  }
+
+  async function saveWinTotalsBoard(year, teams, locked) {
+    const existing = winTotalsCache[year];
+    let payload;
+    if (existing) {
+      const finalMap = {};
+      existing.teams.forEach((t) => (finalMap[t.id] = t.finalWins));
+      payload = {
+        year,
+        locked,
+        teams: teams.map((t) => ({ ...t, finalWins: finalMap[t.id] ?? null })),
+      };
+    } else {
+      payload = { year, locked, teams: teams.map((t) => ({ ...t, finalWins: null })) };
+    }
+    const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't save the win totals board — try again.");
+      return false;
+    }
+    setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
+    const existingYears = leagueMeta.winTotalsYears || [];
+    if (!existingYears.includes(year)) {
+      const updatedMeta = { ...leagueMeta, winTotalsYears: [...existingYears, year].sort((a, b) => a - b) };
+      await storage.set("league-meta", JSON.stringify(updatedMeta), true).catch(() => null);
+      setLeagueMeta(updatedMeta);
+    }
+    return true;
+  }
+
+  async function toggleWinTotalsLock(year) {
+    const board = winTotalsCache[year];
+    if (!board) return;
+    const payload = { ...board, locked: !board.locked };
+    const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (r) setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
+  }
+
+  async function saveWinTotalsResults(year, teamsWithFinalWins) {
+    const payload = { ...winTotalsCache[year], teams: teamsWithFinalWins };
+    const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't save win totals results — try again.");
+      return false;
+    }
+    setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
+    return true;
+  }
+
   /* ---------- standings ---------- */
 
   const loadStandings = useCallback(async () => {
@@ -571,6 +704,7 @@ export default function App() {
         {[
           { id: "picks", label: "Picks", icon: CheckCircle2 },
           { id: "standings", label: "Standings", icon: Trophy },
+          { id: "wintotals", label: "Win Totals", icon: Target },
           { id: "commish", label: "Commish", icon: Shield },
         ].map((t) => {
           const Icon = t.icon;
@@ -619,6 +753,20 @@ export default function App() {
           />
         )}
 
+        {activeTab === "wintotals" && (
+          <WinTotalsTab
+            leagueMeta={leagueMeta}
+            selectedYear={selectedWinTotalsYear}
+            setSelectedYear={setSelectedWinTotalsYear}
+            board={selectedWinTotalsYear != null ? winTotalsCache[selectedWinTotalsYear] : null}
+            loading={winTotalsLoading}
+            picksCache={winTotalsPicksCache}
+            myName={myName}
+            saveWinTotalsPicks={saveWinTotalsPicks}
+            slugToName={slugToName}
+          />
+        )}
+
         {activeTab === "commish" && (
           <CommishTab
             leagueMeta={leagueMeta}
@@ -638,9 +786,15 @@ export default function App() {
             saveWeekGames={saveWeekGames}
             toggleLock={toggleLock}
             saveResults={saveResults}
+            winTotalsCache={winTotalsCache}
+            loadWinTotals={loadWinTotals}
+            saveWinTotalsBoard={saveWinTotalsBoard}
+            toggleWinTotalsLock={toggleWinTotalsLock}
+            saveWinTotalsResults={saveWinTotalsResults}
           />
         )}
       </div>
+
     </div>
   );
 }
@@ -1059,8 +1213,13 @@ function CommishTab({
   saveWeekGames,
   toggleLock,
   saveResults,
+  winTotalsCache,
+  loadWinTotals,
+  saveWinTotalsBoard,
+  toggleWinTotalsLock,
+  saveWinTotalsResults,
 }) {
-  const [mode, setMode] = useState("games"); // games | results
+  const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults
   const [editingWeek, setEditingWeek] = useState(null);
 
   if (!commishUnlocked) {
@@ -1087,12 +1246,18 @@ function CommishTab({
         </div>
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <SecondaryButton onClick={() => { setMode("games"); setEditingWeek(null); }} disabled={mode === "games" && editingWeek === null}>
           Manage games
         </SecondaryButton>
         <SecondaryButton onClick={() => { setMode("results"); setEditingWeek(null); }} disabled={mode === "results" && editingWeek === null}>
           Enter results
+        </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("wtBoard")} disabled={mode === "wtBoard"}>
+          Win totals board
+        </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("wtResults")} disabled={mode === "wtResults"}>
+          Win totals results
         </SecondaryButton>
       </div>
 
@@ -1112,6 +1277,25 @@ function CommishTab({
 
       {mode === "results" && (
         <ResultsManager leagueMeta={leagueMeta} weekCache={weekCache} loadWeek={loadWeek} saveResults={saveResults} />
+      )}
+
+      {mode === "wtBoard" && (
+        <WinTotalsBoardManager
+          leagueMeta={leagueMeta}
+          winTotalsCache={winTotalsCache}
+          loadWinTotals={loadWinTotals}
+          saveWinTotalsBoard={saveWinTotalsBoard}
+          toggleWinTotalsLock={toggleWinTotalsLock}
+        />
+      )}
+
+      {mode === "wtResults" && (
+        <WinTotalsResultsManager
+          leagueMeta={leagueMeta}
+          winTotalsCache={winTotalsCache}
+          loadWinTotals={loadWinTotals}
+          saveWinTotalsResults={saveWinTotalsResults}
+        />
       )}
     </div>
   );
@@ -1903,6 +2087,647 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults }) {
 }
 
 /* -------------------------------- shared -------------------------------- */
+
+/* ------------------------------- win totals tab ----------------------------- */
+
+const WT_SLOTS = [
+  { key: "ACC", label: "ACC", conference: "ACC" },
+  { key: "Big Ten", label: "Big Ten", conference: "Big Ten" },
+  { key: "Big 12", label: "Big 12", conference: "Big 12" },
+  { key: "SEC", label: "SEC", conference: "SEC" },
+  { key: "wild1", label: "Wildcard #1", conference: null },
+  { key: "wild2", label: "Wildcard #2", conference: null },
+];
+
+function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loading, picksCache, myName, saveWinTotalsPicks, slugToName }) {
+  const mySlug = slugify(myName);
+  const [selections, setSelections] = useState({}); // slotKey -> {teamId, side}
+  const [saving, setSaving] = useState(false);
+  const [loadedExisting, setLoadedExisting] = useState(false);
+
+  useEffect(() => {
+    setLoadedExisting(false);
+    setSelections({});
+  }, [selectedYear]);
+
+  useEffect(() => {
+    if (!loadedExisting && board && picksCache[selectedYear]) {
+      const mine = picksCache[selectedYear][mySlug];
+      if (mine) {
+        const sel = {};
+        (mine.picks || []).forEach((p) => {
+          sel[p.slotKey] = { teamId: p.teamId, side: p.side };
+        });
+        setSelections(sel);
+      }
+      setLoadedExisting(true);
+    }
+  }, [board, picksCache, selectedYear, mySlug, loadedExisting]);
+
+  const years = leagueMeta.winTotalsYears || [];
+
+  if (years.length === 0) {
+    return (
+      <EmptyState
+        title="No win totals board yet"
+        body="The commissioner hasn't set up preseason win totals. Check back once they do."
+      />
+    );
+  }
+
+  if (selectedYear == null) return <Spinner label="Loading..." />;
+  if (loading && !board) return <Spinner label="Loading win totals board..." />;
+  if (!board) return <EmptyState title={`${selectedYear} board not found`} body="This board may have been removed." />;
+
+  const teamsById = {};
+  board.teams.forEach((t) => (teamsById[t.id] = t));
+
+  const usedTeamIds = new Set(Object.values(selections).map((s) => s?.teamId).filter(Boolean));
+
+  function updateSlot(slotKey, patch) {
+    setSelections((prev) => ({ ...prev, [slotKey]: { ...prev[slotKey], ...patch } }));
+  }
+
+  const allFilled = WT_SLOTS.every((s) => selections[s.key]?.teamId && selections[s.key]?.side);
+  const conferenceOk = WT_SLOTS.filter((s) => s.conference).every((s) => {
+    const sel = selections[s.key];
+    if (!sel) return false;
+    const team = teamsById[sel.teamId];
+    return team && normalizeConf(team.conference) === s.conference;
+  });
+  const noDuplicates = (() => {
+    const ids = WT_SLOTS.map((s) => selections[s.key]?.teamId).filter(Boolean);
+    return new Set(ids).size === ids.length;
+  })();
+  const canSubmit = allFilled && conferenceOk && noDuplicates;
+
+  const picksForYear = picksCache[selectedYear] || {};
+  const submittedCount = Object.values(picksForYear).filter((v) => v && (v.picks || []).length > 0).length;
+
+  const leaderboardRows = Object.values(picksForYear)
+    .filter((p) => p?.name)
+    .map((p) => {
+      let correct = 0;
+      let graded = 0;
+      (p.picks || []).forEach((pick) => {
+        const team = teamsById[pick.teamId];
+        if (!team) return;
+        const cover = winTotalCover(team);
+        if (!cover) return;
+        graded++;
+        if (cover !== "push" && pick.side === cover) correct++;
+      });
+      return { name: p.name, correct, graded };
+    })
+    .sort((a, b) => b.correct - a.correct);
+
+  return (
+    <div className="cfb-fade-in space-y-4">
+      {years.length > 1 && (
+        <div className="flex items-center gap-2 overflow-x-auto cfb-scroll pb-1">
+          {years
+            .slice()
+            .sort((a, b) => a - b)
+            .map((y) => (
+              <button
+                key={y}
+                onClick={() => setSelectedYear(y)}
+                className="cfb-mono cfb-btn text-xs font-bold px-3 py-2 flex-shrink-0"
+                style={{
+                  background: selectedYear === y ? COLORS.gold : "transparent",
+                  color: selectedYear === y ? COLORS.ink : COLORS.chalkDim,
+                  border: `1px solid ${selectedYear === y ? COLORS.gold : COLORS.lineStrong}`,
+                }}
+              >
+                {y}
+              </button>
+            ))}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <div className="cfb-display text-xl uppercase">{selectedYear} Win Totals</div>
+        {board.locked ? (
+          <span className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.muted }}>
+            <Lock size={12} /> locked
+          </span>
+        ) : (
+          <span className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.goldBright }}>
+            <Unlock size={12} /> open
+          </span>
+        )}
+      </div>
+
+      {!board.locked && (
+        <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+          Pick one team from each Power 4 conference to go Over or Under their win total, plus 2 wildcard picks
+          from any Power 4 team. {submittedCount} of {leagueMeta.members.length} have submitted picks.
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {WT_SLOTS.map((slot) => {
+          const sel = selections[slot.key] || {};
+          const team = sel.teamId ? teamsById[sel.teamId] : null;
+          const options = board.teams.filter(
+            (t) =>
+              (!slot.conference || normalizeConf(t.conference) === slot.conference) &&
+              (!usedTeamIds.has(t.id) || t.id === sel.teamId)
+          );
+          const disabled = board.locked;
+          return (
+            <div key={slot.key} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+              <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.gold }}>
+                {slot.label}
+                {!slot.conference && " (any Power 4 team)"}
+              </div>
+              <select
+                disabled={disabled}
+                value={sel.teamId || ""}
+                onChange={(e) => updateSlot(slot.key, { teamId: e.target.value || null, side: null })}
+                className="cfb-mono text-base sm:text-sm px-2 py-2.5 sm:py-2 w-full mb-2"
+                style={{ background: COLORS.fieldDark, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
+              >
+                <option value="">Select a team...</option>
+                {options.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.school} ({t.conference}) — {t.line}
+                  </option>
+                ))}
+              </select>
+              {team && (
+                <div className="grid grid-cols-2 gap-2">
+                  {["over", "under"].map((side) => {
+                    const isPicked = sel.side === side;
+                    const cover = winTotalCover(team);
+                    const isCorrect = cover === side && cover !== "push";
+                    const isWrong = isPicked && cover && cover !== side && cover !== "push";
+                    let bg = "transparent";
+                    let borderColor = COLORS.lineStrong;
+                    let textColor = COLORS.chalk;
+                    if (isPicked && !cover) {
+                      bg = COLORS.gold;
+                      borderColor = COLORS.gold;
+                      textColor = COLORS.ink;
+                    }
+                    if (cover) {
+                      if (isCorrect) {
+                        bg = "rgba(217,164,65,0.18)";
+                        borderColor = COLORS.gold;
+                      } else if (isPicked && isWrong) {
+                        bg = "rgba(179,55,42,0.18)";
+                        borderColor = COLORS.red;
+                      }
+                    }
+                    return (
+                      <button
+                        key={side}
+                        disabled={disabled}
+                        onClick={() => updateSlot(slot.key, { side })}
+                        className="cfb-btn px-2.5 py-2 text-sm font-semibold capitalize"
+                        style={{ background: bg, border: `1px solid ${borderColor}`, color: textColor, cursor: disabled ? "default" : "pointer" }}
+                      >
+                        {side} {team.line}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {team && team.finalWins != null && (
+                <div className="cfb-mono text-xs mt-1.5" style={{ color: COLORS.muted }}>
+                  final: {team.finalWins} wins{winTotalCover(team) === "push" ? " (push)" : ""}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {!board.locked && (
+        <>
+          <PrimaryButton
+            full
+            disabled={!canSubmit || saving}
+            onClick={async () => {
+              setSaving(true);
+              const picks = WT_SLOTS.map((s) => ({
+                slotKey: s.key,
+                teamId: selections[s.key].teamId,
+                side: selections[s.key].side,
+              }));
+              await saveWinTotalsPicks(selectedYear, picks);
+              setSaving(false);
+            }}
+          >
+            {saving ? "Saving..." : "Save my picks"}
+          </PrimaryButton>
+          {!canSubmit && (
+            <div className="text-xs" style={{ color: COLORS.muted }}>
+              Fill all 6 picks (one per Power 4 conference, plus 2 wildcards) with no repeated teams to save.
+            </div>
+          )}
+        </>
+      )}
+
+      {board.locked && (
+        <WinTotalsGrid leagueMeta={leagueMeta} board={board} picksCache={picksForYear} slugToName={slugToName} />
+      )}
+
+      {board.locked && (
+        <div className="mt-2">
+          <div className="cfb-display text-lg uppercase mb-2">Win Totals Leaderboard</div>
+          {leaderboardRows.length === 0 || leaderboardRows.every((r) => r.graded === 0) ? (
+            <div className="text-sm" style={{ color: COLORS.muted }}>
+              No results entered yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+              <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: COLORS.fieldDeep }}>
+                    <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
+                    <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+                    <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>correct</th>
+                    <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>graded</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaderboardRows.map((r, i) => (
+                    <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                      <td className="px-3 py-2" style={{ color: i === 0 ? COLORS.gold : COLORS.muted }}>
+                        {i === 0 && r.correct > 0 ? <Trophy size={14} /> : i + 1}
+                      </td>
+                      <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
+                      <td className="px-3 py-2 text-right">{r.correct}</td>
+                      <td className="px-3 py-2 text-right">{r.graded}/6</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WinTotalsGrid({ leagueMeta, board, picksCache, slugToName }) {
+  const teamsById = {};
+  board.teams.forEach((t) => (teamsById[t.id] = t));
+  const members = leagueMeta.members;
+  return (
+    <div className="mt-2">
+      <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.chalkDim }}>
+        Everyone's picks
+      </div>
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th className="text-left px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDeep, color: COLORS.chalkDim }}>
+                slot
+              </th>
+              {members.map((m) => (
+                <th key={m} className="text-left px-2 py-1.5 whitespace-nowrap" style={{ background: COLORS.fieldDeep, color: COLORS.chalkDim }}>
+                  {m}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {WT_SLOTS.map((slot) => (
+              <tr key={slot.key} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
+                  {slot.label}
+                </td>
+                {members.map((m) => {
+                  const slugM = slugify(m);
+                  const pdoc = picksCache[slugM];
+                  const pick = (pdoc?.picks || []).find((p) => p.slotKey === slot.key);
+                  const team = pick ? teamsById[pick.teamId] : null;
+                  const label = team ? `${team.school} ${pick.side} ${team.line}` : "—";
+                  let color = COLORS.chalkDim;
+                  if (team) {
+                    const cover = winTotalCover(team);
+                    if (cover === "push") color = COLORS.muted;
+                    else if (cover) color = pick.side === cover ? COLORS.goldBright : COLORS.redBright;
+                  }
+                  return (
+                    <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
+                      {label}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------- win totals commissioner ------------------------- */
+
+function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsBoard, toggleWinTotalsLock }) {
+  const years = leagueMeta.winTotalsYears || [];
+  const [selectedYear, setSelectedYear] = useState(null); // null = new board
+  const [yearInput, setYearInput] = useState(String(defaultWinTotalsYear()));
+  const [teams, setTeams] = useState([]);
+  const [loadedExisting, setLoadedExisting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importError, setImportError] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
+
+  useEffect(() => {
+    if (selectedYear != null && !winTotalsCache[selectedYear]) {
+      loadWinTotals(selectedYear, false);
+    } else if (selectedYear != null && winTotalsCache[selectedYear] && !loadedExisting) {
+      setTeams(winTotalsCache[selectedYear].teams.map((t) => ({ ...t, line: String(t.line) })));
+      setYearInput(String(selectedYear));
+      setLoadedExisting(true);
+    }
+  }, [selectedYear, winTotalsCache, loadWinTotals, loadedExisting]);
+
+  function startNew() {
+    setSelectedYear(null);
+    setLoadedExisting(false);
+    setTeams([]);
+    setYearInput(String(defaultWinTotalsYear()));
+  }
+  function startEdit(y) {
+    setLoadedExisting(false);
+    setSelectedYear(y);
+  }
+
+  function updateTeam(idx, patch) {
+    setTeams((prev) => prev.map((t, i) => (i === idx ? { ...t, ...patch } : t)));
+  }
+  function addRow() {
+    setTeams((prev) => [...prev, newWinTotalsTeam()]);
+  }
+  function removeRow(idx) {
+    setTeams((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function handleParseImport() {
+    setImportError(null);
+    let data;
+    try {
+      data = JSON.parse(importText);
+    } catch (e) {
+      setImportError("That doesn't look like valid JSON. Make sure you copied the whole list, brackets included.");
+      return;
+    }
+    if (!Array.isArray(data)) {
+      setImportError("Expected a JSON array of teams.");
+      return;
+    }
+    try {
+      const existingByName = {};
+      teams.forEach((t) => {
+        existingByName[normalizeTeam(t.school)] = t.id;
+      });
+      const cleaned = data.map((t, i) => {
+        if (!t.school || t.line == null || isNaN(Number(t.line))) {
+          throw new Error(`Entry ${i + 1} is missing a school name or numeric line.`);
+        }
+        const conf = normalizeConf(t.conference);
+        if (!P4_CONFERENCES.includes(conf)) {
+          throw new Error(
+            `Entry ${i + 1} (${t.school}) has an unrecognized conference "${t.conference}". Must be ACC, Big Ten, Big 12, or SEC.`
+          );
+        }
+        const existingId = existingByName[normalizeTeam(t.school)];
+        return { id: existingId || newId(), school: String(t.school), conference: conf, line: String(t.line) };
+      });
+      setTeams(cleaned);
+      setImportText("");
+      setImportOpen(false);
+    } catch (e) {
+      setImportError(e.message);
+    }
+  }
+
+  const currentBoard = selectedYear != null ? winTotalsCache[selectedYear] : null;
+  const valid =
+    yearInput.trim() &&
+    !isNaN(Number(yearInput)) &&
+    teams.length > 0 &&
+    teams.every((t) => t.school.trim() && t.line !== "" && !isNaN(Number(t.line)) && P4_CONFERENCES.includes(t.conference));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        <SecondaryButton onClick={startNew} disabled={selectedYear === null}>
+          <span className="flex items-center gap-1"><Plus size={12} /> new board</span>
+        </SecondaryButton>
+        {years
+          .slice()
+          .sort((a, b) => b - a)
+          .map((y) => (
+            <SecondaryButton key={y} onClick={() => startEdit(y)} disabled={selectedYear === y}>
+              edit {y}
+            </SecondaryButton>
+          ))}
+      </div>
+
+      {selectedYear != null && currentBoard && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span style={{ color: COLORS.chalkDim }}>{selectedYear} board is currently</span>
+          <button
+            onClick={() => toggleWinTotalsLock(selectedYear)}
+            className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2 flex items-center gap-1"
+            style={{
+              background: currentBoard.locked ? "rgba(179,55,42,0.16)" : "rgba(217,164,65,0.16)",
+              border: `1px solid ${currentBoard.locked ? COLORS.red : COLORS.gold}`,
+              color: currentBoard.locked ? COLORS.redBright : COLORS.goldBright,
+            }}
+          >
+            {currentBoard.locked ? <Lock size={12} /> : <Unlock size={12} />}
+            {currentBoard.locked ? "locked — click to open" : "open — click to lock"}
+          </button>
+        </div>
+      )}
+
+      <div>
+        <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>
+          Season year
+        </div>
+        <div style={{ maxWidth: 120 }}>
+          <FieldInput type="number" value={yearInput} onChange={setYearInput} disabled={selectedYear != null} />
+        </div>
+      </div>
+
+      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
+        <button
+          onClick={() => setImportOpen((o) => !o)}
+          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5 w-full"
+          style={{ color: COLORS.goldBright }}
+        >
+          <Upload size={13} /> Paste win totals list
+          <span className="flex-1" />
+          {importOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        </button>
+        {importOpen && (
+          <div className="mt-3 space-y-2">
+            <div className="text-xs" style={{ color: COLORS.chalkDim }}>
+              Ask me in chat for this year's Power 4 win total lines, then paste the list here. This replaces the
+              team list below — review it before saving.
+            </div>
+            <textarea
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              rows={5}
+              className="cfb-mono text-base sm:text-xs w-full p-2"
+              style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
+              placeholder='[{"school":"Ohio State","conference":"Big Ten","line":10.5}, {"school":"Georgia","conference":"SEC","line":9.5}]'
+            />
+            {importError && <Banner onDismiss={() => setImportError(null)}>{importError}</Banner>}
+            <SecondaryButton onClick={handleParseImport} disabled={!importText.trim()}>
+              Load list
+            </SecondaryButton>
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        {teams.map((t, idx) => (
+          <div key={t.id} className="flex items-center gap-2 px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+            <div className="flex-1">
+              <FieldInput value={t.school} onChange={(v) => updateTeam(idx, { school: v })} placeholder="School" />
+            </div>
+            <div style={{ width: 110, flexShrink: 0 }}>
+              <select
+                value={t.conference}
+                onChange={(e) => updateTeam(idx, { conference: e.target.value })}
+                className="cfb-mono text-base sm:text-sm px-2 py-2.5 sm:py-2 w-full"
+                style={{ background: COLORS.fieldDark, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
+              >
+                {P4_CONFERENCES.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
+            <div style={{ width: 70, flexShrink: 0 }}>
+              <FieldInput type="number" value={t.line} onChange={(v) => updateTeam(idx, { line: v })} placeholder="line" />
+            </div>
+            <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}>
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <SecondaryButton onClick={addRow}>
+        <span className="flex items-center gap-1"><Plus size={12} /> add team</span>
+      </SecondaryButton>
+
+      <PrimaryButton
+        full
+        disabled={!valid || busy}
+        onClick={async () => {
+          setBusy(true);
+          const yr = Number(yearInput);
+          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), conference: t.conference, line: Number(t.line) }));
+          const ok = await saveWinTotalsBoard(yr, cleanTeams, currentBoard?.locked || false);
+          setBusy(false);
+          if (ok) setSelectedYear(yr);
+        }}
+      >
+        {busy ? "Saving..." : selectedYear != null ? "Save changes" : "Create board"}
+      </PrimaryButton>
+    </div>
+  );
+}
+
+function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsResults }) {
+  const years = leagueMeta.winTotalsYears || [];
+  const [selectedYear, setSelectedYear] = useState(years.length ? Math.max(...years) : null);
+  const [finals, setFinals] = useState({});
+  const [busy, setBusy] = useState(false);
+  const board = selectedYear != null ? winTotalsCache[selectedYear] : null;
+
+  useEffect(() => {
+    if (selectedYear != null && !winTotalsCache[selectedYear]) loadWinTotals(selectedYear, false);
+  }, [selectedYear, winTotalsCache, loadWinTotals]);
+
+  useEffect(() => {
+    if (board) {
+      const init = {};
+      board.teams.forEach((t) => {
+        init[t.id] = t.finalWins ?? "";
+      });
+      setFinals(init);
+    }
+  }, [board?.year]);
+
+  if (!years.length) {
+    return <EmptyState title="No win totals board yet" body="Set one up under Win totals board first." />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        {years
+          .slice()
+          .sort((a, b) => b - a)
+          .map((y) => (
+            <SecondaryButton key={y} onClick={() => setSelectedYear(y)} disabled={selectedYear === y}>
+              {y}
+            </SecondaryButton>
+          ))}
+      </div>
+
+      {!board && <Spinner label="Loading board..." />}
+
+      {board && (
+        <>
+          <div className="text-xs" style={{ color: COLORS.muted }}>
+            Enter each team's final regular-season win count. Picks grade automatically as you fill these in.
+          </div>
+          <div className="space-y-2">
+            {board.teams.map((t) => (
+              <div key={t.id} className="flex items-center gap-2 px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+                <span className="text-sm flex-1 truncate">
+                  {t.school}{" "}
+                  <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                    ({t.conference}, line {t.line})
+                  </span>
+                </span>
+                <div style={{ width: 70, flexShrink: 0 }}>
+                  <FieldInput
+                    type="number"
+                    value={finals[t.id] ?? ""}
+                    onChange={(v) => setFinals((p) => ({ ...p, [t.id]: v }))}
+                    placeholder="wins"
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+          <PrimaryButton
+            full
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              const teamsWithFinal = board.teams.map((t) => ({
+                ...t,
+                finalWins: finals[t.id] === "" || finals[t.id] == null ? null : Number(finals[t.id]),
+              }));
+              await saveWinTotalsResults(selectedYear, teamsWithFinal);
+              setBusy(false);
+            }}
+          >
+            {busy ? "Saving..." : "Save results"}
+          </PrimaryButton>
+        </>
+      )}
+    </div>
+  );
+}
 
 function EmptyState({ title, body }) {
   return (
