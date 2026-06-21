@@ -23,6 +23,8 @@ import {
   TrendingUp,
   Target,
   Award,
+  Flame,
+  DollarSign,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -149,6 +151,20 @@ const PLAYOFF_SLOTS = [
 
 function newPlayoffTeam() {
   return { id: newId(), school: "", odds: "" };
+}
+
+const DEFAULT_MONEY_SETTINGS = {
+  buyIn: 100,
+  weeklyWinAmount: 25,
+  weeklyLossAmount: 10,
+  lockAmount: 10,
+  secondPlacePayout: 100,
+  thirdPlacePayout: 50,
+};
+
+function fmtMoney(n) {
+  const sign = n < 0 ? "-" : "";
+  return `${sign}$${Math.abs(n).toFixed(2).replace(/\.00$/, "")}`;
 }
 
 // Splits teams into 3 roughly-even tiers by best (lowest positive) odds first.
@@ -300,6 +316,9 @@ export default function App() {
   const [playoffPicksCache, setPlayoffPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
   const [playoffLoading, setPlayoffLoading] = useState(false);
 
+  const [moneyData, setMoneyData] = useState(null);
+  const [moneyLoading, setMoneyLoading] = useState(false);
+
   const [commishUnlocked, setCommishUnlocked] = useState(false);
   const [passcodeInput, setPasscodeInput] = useState("");
 
@@ -345,6 +364,9 @@ export default function App() {
       weeks: [],
       winTotalsYears: [],
       playoffYears: [],
+      moneySettings: DEFAULT_MONEY_SETTINGS,
+      seasonFinalized: false,
+      seasonPayouts: {},
       createdAt: Date.now(),
     };
     const r = await storage.set("league-meta", JSON.stringify(meta), true).catch(() => null);
@@ -422,9 +444,9 @@ export default function App() {
   async function savePick(weekNum, gameId, side) {
     setSavingGameId(gameId);
     const mySlug = slugify(myName);
-    const current = picksCache[weekNum]?.[mySlug]?.picks || {};
-    const updatedPicks = { ...current, [gameId]: side };
-    const payload = { name: myName, picks: updatedPicks, submittedAt: Date.now() };
+    const existing = picksCache[weekNum]?.[mySlug] || {};
+    const updatedPicks = { ...(existing.picks || {}), [gameId]: side };
+    const payload = { name: myName, picks: updatedPicks, lockedGameId: existing.lockedGameId || null, submittedAt: Date.now() };
     const r = await storage
       .set(`week:${weekNum}:picks:${mySlug}`, JSON.stringify(payload), true)
       .catch(() => null);
@@ -437,6 +459,25 @@ export default function App() {
       }));
     }
     setSavingGameId(null);
+  }
+
+  async function toggleMyLock(weekNum, gameId) {
+    const mySlug = slugify(myName);
+    const existing = picksCache[weekNum]?.[mySlug] || {};
+    if (!existing.picks || !existing.picks[gameId]) return; // can't lock a game you haven't picked
+    const nextLockedGameId = existing.lockedGameId === gameId ? null : gameId;
+    const payload = { ...existing, name: myName, lockedGameId: nextLockedGameId, submittedAt: Date.now() };
+    const r = await storage
+      .set(`week:${weekNum}:picks:${mySlug}`, JSON.stringify(payload), true)
+      .catch(() => null);
+    if (!r) {
+      setError("Couldn't update your lock — check your connection and try again.");
+      return;
+    }
+    setPicksCache((prev) => ({
+      ...prev,
+      [weekNum]: { ...(prev[weekNum] || {}), [mySlug]: payload },
+    }));
   }
 
   /* ---------- commissioner actions ---------- */
@@ -705,7 +746,16 @@ export default function App() {
         snap.docs.forEach((d) => batch.delete(d.ref));
         await batch.commit();
       }
-      const freshMeta = { ...leagueMeta, members: [], weeks: [], winTotalsYears: [], playoffYears: [] };
+      const freshMeta = {
+        ...leagueMeta,
+        members: [],
+        weeks: [],
+        winTotalsYears: [],
+        playoffYears: [],
+        moneySettings: DEFAULT_MONEY_SETTINGS,
+        seasonFinalized: false,
+        seasonPayouts: {},
+      };
       const r = await storage.set("league-meta", JSON.stringify(freshMeta), true).catch(() => null);
       if (!r) {
         setError("Reset partially failed while resaving league info — check the Firebase console.");
@@ -874,6 +924,160 @@ export default function App() {
     if (phase === "app" && activeTab === "standings") loadStandings();
   }, [phase, activeTab, loadStandings]);
 
+  /* ---------- money ---------- */
+
+  const loadMoneyData = useCallback(async () => {
+    if (!leagueMeta) return;
+    setMoneyLoading(true);
+    const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
+    const perMember = {};
+    leagueMeta.members.forEach((m) => (perMember[m] = { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0 }));
+
+    for (const w of leagueMeta.weeks) {
+      const raw = await safeGet(`week:${w}:games`, true);
+      if (!raw) continue;
+      const weekObj = JSON.parse(raw);
+      if (!weekObj.graded) continue;
+      const list = await storage.list(`week:${w}:picks:`, true).catch(() => null);
+      const keys = list?.keys || [];
+      const weekWins = {}; // member -> wins this week (only members who played)
+      const picksByMember = {};
+      for (const k of keys) {
+        const raw2 = await safeGet(k, true);
+        if (!raw2) continue;
+        const picksObj = JSON.parse(raw2);
+        const member = picksObj.name || slugToName[k.slice(`week:${w}:picks:`.length)];
+        if (!member || !picksObj.picks || Object.keys(picksObj.picks).length === 0) continue;
+        picksByMember[member] = picksObj;
+        let wins = 0;
+        weekObj.games.forEach((g) => {
+          const cover = coveringSide(g);
+          if (cover && cover !== "push" && picksObj.picks[g.id] === cover) wins++;
+        });
+        weekWins[member] = wins;
+        if (!perMember[member]) perMember[member] = { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0 };
+      }
+
+      // Weekly winner/loser money — only if there's an actual spread of results that week.
+      const entries = Object.entries(weekWins);
+      if (entries.length) {
+        const max = Math.max(...entries.map(([, c]) => c));
+        const min = Math.min(...entries.map(([, c]) => c));
+        if (max > 0 && max !== min) {
+          const winners = entries.filter(([, c]) => c === max).map(([m]) => m);
+          const losers = entries.filter(([, c]) => c === min).map(([m]) => m);
+          const winShare = settings.weeklyWinAmount / winners.length;
+          const lossShare = settings.weeklyLossAmount / losers.length;
+          winners.forEach((m) => (perMember[m].weeklyWin += winShare));
+          losers.forEach((m) => (perMember[m].weeklyLoss += lossShare));
+        }
+      }
+
+      // Lock of the week — full amount each, no splitting.
+      Object.entries(picksByMember).forEach(([member, picksObj]) => {
+        if (!picksObj.lockedGameId) return;
+        const game = weekObj.games.find((g) => g.id === picksObj.lockedGameId);
+        if (!game) return;
+        const cover = coveringSide(game);
+        if (!cover || cover === "push") return;
+        const myPick = picksObj.picks[picksObj.lockedGameId];
+        if (!myPick) return;
+        if (myPick === cover) perMember[member].lockWin += settings.lockAmount;
+        else perMember[member].lockLoss += settings.lockAmount;
+      });
+    }
+
+    const totalBuyIns = settings.buyIn * leagueMeta.members.length;
+    let totalWeeklyWinsPaid = 0;
+    let totalWeeklyLossesOwed = 0;
+    let totalLockWinsPaid = 0;
+    let totalLockLossesOwed = 0;
+    Object.values(perMember).forEach((m) => {
+      totalWeeklyWinsPaid += m.weeklyWin;
+      totalWeeklyLossesOwed += m.weeklyLoss;
+      totalLockWinsPaid += m.lockWin;
+      totalLockLossesOwed += m.lockLoss;
+    });
+    const potRemaining = totalBuyIns - totalWeeklyWinsPaid + totalWeeklyLossesOwed - totalLockWinsPaid + totalLockLossesOwed;
+
+    setMoneyData({
+      perMember,
+      totalBuyIns,
+      totalWeeklyWinsPaid,
+      totalWeeklyLossesOwed,
+      totalLockWinsPaid,
+      totalLockLossesOwed,
+      potRemaining,
+    });
+    setMoneyLoading(false);
+  }, [leagueMeta, slugToName]);
+
+  useEffect(() => {
+    if (phase === "app" && activeTab === "money") loadMoneyData();
+  }, [phase, activeTab, loadMoneyData]);
+
+  async function saveMoneySettings(settings) {
+    const updated = { ...leagueMeta, moneySettings: settings };
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't save money settings — try again.");
+      return false;
+    }
+    setLeagueMeta(updated);
+    return true;
+  }
+
+  async function finalizeSeasonPayouts() {
+    if (!standings || !moneyData) {
+      setError("Load Standings and Money tabs first so there's data to finalize from.");
+      return false;
+    }
+    const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
+    const rows = Object.entries(standings)
+      .map(([name, s]) => ({ name, totalWins: s.totalWins }))
+      .sort((a, b) => b.totalWins - a.totalWins);
+    if (!rows.length) {
+      setError("No standings to finalize yet.");
+      return false;
+    }
+    const groups = [];
+    rows.forEach((r) => {
+      const last = groups[groups.length - 1];
+      if (last && last.totalWins === r.totalWins) last.names.push(r.name);
+      else groups.push({ totalWins: r.totalWins, names: [r.name] });
+    });
+    const placementAmounts = [
+      moneyData.potRemaining - settings.secondPlacePayout - settings.thirdPlacePayout,
+      settings.secondPlacePayout,
+      settings.thirdPlacePayout,
+    ];
+    const payouts = {};
+    let placementIndex = 0;
+    for (const group of groups) {
+      if (placementIndex > 2) break;
+      const slotsRemaining = 3 - placementIndex;
+      const slotsThisGroup = Math.min(group.names.length, slotsRemaining);
+      const amountForGroup = placementAmounts.slice(placementIndex, placementIndex + slotsThisGroup).reduce((a, b) => a + b, 0);
+      const perPerson = amountForGroup / group.names.length;
+      group.names.forEach((n) => (payouts[n] = (payouts[n] || 0) + perPerson));
+      placementIndex += group.names.length;
+    }
+    const updated = { ...leagueMeta, seasonFinalized: true, seasonPayouts: payouts };
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't finalize season payouts — try again.");
+      return false;
+    }
+    setLeagueMeta(updated);
+    return true;
+  }
+
+  async function unfinalizeSeasonPayouts() {
+    const updated = { ...leagueMeta, seasonFinalized: false, seasonPayouts: {} };
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (r) setLeagueMeta(updated);
+  }
+
   /* ------------------------------- render ------------------------------- */
 
   const rootStyle = {
@@ -976,6 +1180,7 @@ export default function App() {
           { id: "standings", label: "Standings", icon: Trophy },
           { id: "wintotals", label: "Win Totals", icon: Target },
           { id: "playoff", label: "Playoff", icon: Award },
+          { id: "money", label: "Money", icon: DollarSign },
           { id: "commish", label: "Commish", icon: Shield },
         ].map((t) => {
           const Icon = t.icon;
@@ -1012,6 +1217,7 @@ export default function App() {
             savePick={savePick}
             savingGameId={savingGameId}
             slugToName={slugToName}
+            toggleMyLock={toggleMyLock}
           />
         )}
 
@@ -1052,6 +1258,15 @@ export default function App() {
           />
         )}
 
+        {activeTab === "money" && (
+          <MoneyTab
+            leagueMeta={leagueMeta}
+            moneyData={moneyData}
+            loading={moneyLoading}
+            onRefresh={loadMoneyData}
+          />
+        )}
+
         {activeTab === "commish" && (
           <CommishTab
             leagueMeta={leagueMeta}
@@ -1081,6 +1296,13 @@ export default function App() {
             savePlayoffBoard={savePlayoffBoard}
             togglePlayoffLock={togglePlayoffLock}
             savePlayoffResults={savePlayoffResults}
+            moneyData={moneyData}
+            loadMoneyData={loadMoneyData}
+            saveMoneySettings={saveMoneySettings}
+            standings={standings}
+            loadStandings={loadStandings}
+            finalizeSeasonPayouts={finalizeSeasonPayouts}
+            unfinalizeSeasonPayouts={unfinalizeSeasonPayouts}
             resetAllData={resetAllData}
           />
         )}
@@ -1209,7 +1431,7 @@ function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
 
 /* ------------------------------- picks tab --------------------------------- */
 
-function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName }) {
+function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock }) {
   const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone"
 
   useEffect(() => {
@@ -1235,6 +1457,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
 
   const mySlug = slugify(myName);
   const myPicks = picksCache[selectedWeek]?.[mySlug]?.picks || {};
+  const myLockedGameId = picksCache[selectedWeek]?.[mySlug]?.lockedGameId || null;
   const allEntries = Object.entries(picksCache[selectedWeek] || {});
   const submittedCount = allEntries.filter(([, v]) => v && Object.keys(v.picks || {}).length > 0).length;
 
@@ -1390,6 +1613,41 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       );
                     })}
                   </div>
+                  {myPick && (() => {
+                    const isMyLock = myLockedGameId === g.id;
+                    const lockGraded = week.graded && isMyLock;
+                    const lockWon = lockGraded && cover !== "push" && myPick === cover;
+                    const lockLost = lockGraded && cover !== "push" && myPick !== cover;
+                    let lockColor = COLORS.chalkDim;
+                    let lockBorder = COLORS.lineStrong;
+                    if (isMyLock && !week.graded) {
+                      lockColor = COLORS.goldBright;
+                      lockBorder = COLORS.gold;
+                    } else if (lockWon) {
+                      lockColor = COLORS.goldBright;
+                      lockBorder = COLORS.gold;
+                    } else if (lockLost) {
+                      lockColor = COLORS.redBright;
+                      lockBorder = COLORS.red;
+                    }
+                    return (
+                      <button
+                        disabled={disabled}
+                        onClick={() => toggleMyLock(selectedWeek, g.id)}
+                        className="cfb-btn flex items-center gap-1.5 mt-2 px-2 py-1.5 text-xs cfb-mono uppercase tracking-wide"
+                        style={{
+                          background: isMyLock ? "rgba(217,164,65,0.12)" : "transparent",
+                          border: `1px solid ${lockBorder}`,
+                          color: lockColor,
+                          cursor: disabled ? "default" : "pointer",
+                          opacity: disabled && !isMyLock ? 0.5 : 1,
+                        }}
+                      >
+                        <Flame size={12} />
+                        {isMyLock ? (lockGraded ? (lockWon ? "Lock won" : lockLost ? "Lock lost" : "Your lock") : "Your lock") : "Make this your lock"}
+                      </button>
+                    );
+                  })()}
                   <div className="flex items-center justify-between mt-1.5">
                     <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
                       {saving && "saving..."}
@@ -1453,6 +1711,7 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                   {members.map((m) => {
                     const slug = slugify(m);
                     const pick = picksCache[slug]?.picks?.[g.id];
+                    const isLock = picksCache[slug]?.lockedGameId === g.id;
                     const label = pick ? (pick === "home" ? g.home : g.away) : "—";
                     let color = COLORS.chalkDim;
                     if (week.graded && pick) {
@@ -1461,7 +1720,10 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                     }
                     return (
                       <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
-                        {label}
+                        <span className="inline-flex items-center gap-1">
+                          {label}
+                          {isLock && <Flame size={11} style={{ color: COLORS.gold, flexShrink: 0 }} />}
+                        </span>
                       </td>
                     );
                   })}
@@ -1566,9 +1828,16 @@ function CommishTab({
   savePlayoffBoard,
   togglePlayoffLock,
   savePlayoffResults,
+  moneyData,
+  loadMoneyData,
+  saveMoneySettings,
+  standings,
+  loadStandings,
+  finalizeSeasonPayouts,
+  unfinalizeSeasonPayouts,
   resetAllData,
 }) {
-  const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults
+  const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults | money
   const [editingWeek, setEditingWeek] = useState(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetConfirming, setResetConfirming] = useState(false);
@@ -1616,6 +1885,9 @@ function CommishTab({
         </SecondaryButton>
         <SecondaryButton onClick={() => setMode("pResults")} disabled={mode === "pResults"}>
           Playoff results
+        </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("money")} disabled={mode === "money"}>
+          Money
         </SecondaryButton>
       </div>
 
@@ -1675,6 +1947,19 @@ function CommishTab({
         />
       )}
 
+      {mode === "money" && (
+        <MoneySettingsManager
+          leagueMeta={leagueMeta}
+          moneyData={moneyData}
+          loadMoneyData={loadMoneyData}
+          saveMoneySettings={saveMoneySettings}
+          standings={standings}
+          loadStandings={loadStandings}
+          finalizeSeasonPayouts={finalizeSeasonPayouts}
+          unfinalizeSeasonPayouts={unfinalizeSeasonPayouts}
+        />
+      )}
+
       <div className="mt-6 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
         <button
           onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
@@ -1687,9 +1972,9 @@ function CommishTab({
           <div className="mt-3 p-3 space-y-3" style={{ background: "rgba(179,55,42,0.08)", border: `1px solid ${COLORS.red}` }}>
             <div className="text-sm" style={{ color: COLORS.chalk }}>
               This permanently deletes every member, every week's games and picks, every win totals board and
-              pick, and every playoff board and pick. Your league name and commissioner passcode are kept, but
-              everyone — including you — will need to rejoin under a name afterward. Remove this button before
-              opening the pool to real members.
+              pick, every playoff board and pick, and resets money settings and season payouts. Your league name
+              and commissioner passcode are kept, but everyone — including you — will need to rejoin under a
+              name afterward. Remove this button before opening the pool to real members.
             </div>
             {!resetConfirming ? (
               <SecondaryButton
@@ -3730,6 +4015,276 @@ function PlayoffResultsManager({ leagueMeta, playoffCache, loadPlayoff, savePlay
           </PrimaryButton>
         </>
       )}
+    </div>
+  );
+}
+
+/* ---------------------------------- money ------------------------------------ */
+
+function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
+  if (loading && !moneyData) return <Spinner label="Tallying the money..." />;
+  if (!moneyData) {
+    return (
+      <div className="cfb-fade-in space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="cfb-display text-xl uppercase">Money</div>
+          <button onClick={onRefresh} className="cfb-mono text-xs flex items-center gap-1 opacity-70 hover:opacity-100">
+            <RefreshCw size={12} /> refresh
+          </button>
+        </div>
+        <EmptyState title="No money data yet" body="Once a week is graded, weekly and lock payouts will show up here." />
+      </div>
+    );
+  }
+
+  const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
+  const rows = leagueMeta.members
+    .map((name) => {
+      const m = moneyData.perMember[name] || { weeklyWin: 0, weeklyLoss: 0, lockWin: 0, lockLoss: 0 };
+      const buyIn = -settings.buyIn;
+      const weeklyNet = m.weeklyWin - m.weeklyLoss;
+      const lockNet = m.lockWin - m.lockLoss;
+      const seasonPayout = leagueMeta.seasonFinalized ? leagueMeta.seasonPayouts?.[name] || 0 : 0;
+      const total = buyIn + weeklyNet + lockNet + seasonPayout;
+      return { name, buyIn, weeklyNet, lockNet, seasonPayout, total };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  return (
+    <div className="cfb-fade-in space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="cfb-display text-xl uppercase">Money</div>
+        <button onClick={onRefresh} className="cfb-mono text-xs flex items-center gap-1 opacity-70 hover:opacity-100">
+          <RefreshCw size={12} className={loading ? "animate-spin" : ""} /> refresh
+        </button>
+      </div>
+
+      {leagueMeta.seasonFinalized && (
+        <div
+          className="px-3 py-2 flex items-center gap-2"
+          style={{ background: "rgba(217,164,65,0.12)", border: `1px solid ${COLORS.gold}` }}
+        >
+          <Trophy size={16} style={{ color: COLORS.gold }} />
+          <span className="text-sm font-semibold">Season finalized — final payouts are reflected below.</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+          <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.chalkDim }}>Pot (buy-ins)</div>
+          <div className="text-lg font-bold cfb-mono">{fmtMoney(moneyData.totalBuyIns)}</div>
+        </div>
+        <div className="px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+          <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.chalkDim }}>Pot remaining</div>
+          <div className="text-lg font-bold cfb-mono" style={{ color: moneyData.potRemaining < 0 ? COLORS.redBright : COLORS.chalk }}>
+            {fmtMoney(moneyData.potRemaining)}
+          </div>
+        </div>
+      </div>
+      <div className="text-xs" style={{ color: COLORS.muted }}>
+        Buy-in is {fmtMoney(settings.buyIn)} per person. Paid out so far:{" "}
+        {fmtMoney(moneyData.totalWeeklyWinsPaid + moneyData.totalLockWinsPaid)}. Owed back to the pot:{" "}
+        {fmtMoney(moneyData.totalWeeklyLossesOwed + moneyData.totalLockLossesOwed)}.
+      </div>
+
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>buy-in</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weekly</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>lock</th>
+              {leagueMeta.seasonFinalized && (
+                <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>payout</th>
+              )}
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
+                <td className="px-3 py-2 text-right" style={{ color: COLORS.redBright }}>{fmtMoney(r.buyIn)}</td>
+                <td
+                  className="px-3 py-2 text-right"
+                  style={{ color: r.weeklyNet > 0 ? COLORS.goldBright : r.weeklyNet < 0 ? COLORS.redBright : COLORS.chalkDim }}
+                >
+                  {fmtMoney(r.weeklyNet)}
+                </td>
+                <td
+                  className="px-3 py-2 text-right"
+                  style={{ color: r.lockNet > 0 ? COLORS.goldBright : r.lockNet < 0 ? COLORS.redBright : COLORS.chalkDim }}
+                >
+                  {fmtMoney(r.lockNet)}
+                </td>
+                {leagueMeta.seasonFinalized && (
+                  <td className="px-3 py-2 text-right" style={{ color: COLORS.goldBright }}>{fmtMoney(r.seasonPayout)}</td>
+                )}
+                <td
+                  className="px-3 py-2 text-right font-bold"
+                  style={{ color: r.total > 0 ? COLORS.goldBright : r.total < 0 ? COLORS.redBright : COLORS.chalk }}
+                >
+                  {fmtMoney(r.total)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="text-xs" style={{ color: COLORS.muted }}>
+        Negative numbers mean money owed. This is a running ledger, not a payment processor — settle up with each other directly.
+      </div>
+    </div>
+  );
+}
+
+function MoneySettingsManager({
+  leagueMeta,
+  moneyData,
+  loadMoneyData,
+  saveMoneySettings,
+  standings,
+  loadStandings,
+  finalizeSeasonPayouts,
+  unfinalizeSeasonPayouts,
+}) {
+  const current = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
+  const [form, setForm] = useState({
+    buyIn: String(current.buyIn),
+    weeklyWinAmount: String(current.weeklyWinAmount),
+    weeklyLossAmount: String(current.weeklyLossAmount),
+    lockAmount: String(current.lockAmount),
+    secondPlacePayout: String(current.secondPlacePayout),
+    thirdPlacePayout: String(current.thirdPlacePayout),
+  });
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [finalizing, setFinalizing] = useState(false);
+
+  useEffect(() => {
+    loadMoneyData();
+    loadStandings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function update(field, value) {
+    setForm((p) => ({ ...p, [field]: value }));
+  }
+
+  const valid = Object.values(form).every((v) => v !== "" && !isNaN(Number(v)) && Number(v) >= 0);
+
+  const standingsRows = Object.entries(standings || {})
+    .map(([name, s]) => ({ name, totalWins: s.totalWins }))
+    .sort((a, b) => b.totalWins - a.totalWins);
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <div className="cfb-display text-lg uppercase mb-2">Money settings</div>
+        <div className="space-y-2">
+          {[
+            ["buyIn", "Buy-in (per person)"],
+            ["weeklyWinAmount", "Weekly best-record prize"],
+            ["weeklyLossAmount", "Weekly worst-record fee"],
+            ["lockAmount", "Lock of the week"],
+            ["secondPlacePayout", "Season 2nd place"],
+            ["thirdPlacePayout", "Season 3rd place"],
+          ].map(([field, label]) => (
+            <div key={field} className="flex items-center gap-2">
+              <div className="text-sm flex-1" style={{ color: COLORS.chalkDim }}>{label}</div>
+              <div style={{ width: 90, flexShrink: 0 }}>
+                <FieldInput type="number" value={form[field]} onChange={(v) => update(field, v)} />
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-2">
+          <SecondaryButton
+            disabled={!valid || busy}
+            onClick={async () => {
+              setBusy(true);
+              await saveMoneySettings({
+                buyIn: Number(form.buyIn),
+                weeklyWinAmount: Number(form.weeklyWinAmount),
+                weeklyLossAmount: Number(form.weeklyLossAmount),
+                lockAmount: Number(form.lockAmount),
+                secondPlacePayout: Number(form.secondPlacePayout),
+                thirdPlacePayout: Number(form.thirdPlacePayout),
+              });
+              await loadMoneyData();
+              setBusy(false);
+            }}
+          >
+            {busy ? "Saving..." : "Save settings"}
+          </SecondaryButton>
+        </div>
+      </div>
+
+      <div className="pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+        <div className="cfb-display text-lg uppercase mb-2">Season payouts</div>
+        {leagueMeta.seasonFinalized ? (
+          <div className="space-y-3">
+            <div className="text-sm" style={{ color: COLORS.chalkDim }}>Season is finalized. Final payouts:</div>
+            <div className="space-y-1">
+              {Object.entries(leagueMeta.seasonPayouts || {})
+                .sort((a, b) => b[1] - a[1])
+                .map(([name, amt]) => (
+                  <div key={name} className="flex items-center justify-between text-sm">
+                    <span>{name}</span>
+                    <span className="cfb-mono font-bold" style={{ color: COLORS.goldBright }}>{fmtMoney(amt)}</span>
+                  </div>
+                ))}
+            </div>
+            <SecondaryButton onClick={unfinalizeSeasonPayouts}>Undo finalize</SecondaryButton>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+              Pot remaining right now:{" "}
+              <span className="cfb-mono font-bold" style={{ color: COLORS.chalk }}>
+                {moneyData ? fmtMoney(moneyData.potRemaining) : "—"}
+              </span>
+              . 3rd gets {fmtMoney(current.thirdPlacePayout)}, 2nd gets {fmtMoney(current.secondPlacePayout)}, 1st gets
+              whatever's left. This locks in the current Standings as final — only do this once the season is actually over.
+            </div>
+            {standingsRows.length > 0 && (
+              <div className="text-xs space-y-0.5" style={{ color: COLORS.muted }}>
+                {standingsRows.slice(0, 5).map((r, i) => (
+                  <div key={r.name}>{i + 1}. {r.name} — {r.totalWins} wins</div>
+                ))}
+              </div>
+            )}
+            {!confirming ? (
+              <SecondaryButton onClick={() => setConfirming(true)}>Finalize season payouts</SecondaryButton>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-sm font-semibold" style={{ color: COLORS.redBright }}>
+                  Lock in payouts based on current standings?
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => {
+                      setFinalizing(true);
+                      await finalizeSeasonPayouts();
+                      setFinalizing(false);
+                      setConfirming(false);
+                    }}
+                    disabled={finalizing}
+                    className="cfb-mono cfb-btn text-xs font-bold uppercase tracking-wider px-3 py-2"
+                    style={{ background: COLORS.gold, color: COLORS.ink, border: `1px solid ${COLORS.gold}`, opacity: finalizing ? 0.6 : 1 }}
+                  >
+                    {finalizing ? "Finalizing..." : "Yes, finalize"}
+                  </button>
+                  <SecondaryButton onClick={() => setConfirming(false)} disabled={finalizing}>
+                    Cancel
+                  </SecondaryButton>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
