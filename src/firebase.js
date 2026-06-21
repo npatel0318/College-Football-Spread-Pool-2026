@@ -12,7 +12,6 @@ const firebaseConfig = {
   storageBucket: "cfb-spread-pool-2026.firebasestorage.app",
   messagingSenderId: "353505199504",
   appId: ":353505199504:web:d733f788471d2b822a9f15",
-  measurementId: "G-0QQ697XJR0"
 };
 
 export const app = initializeApp(firebaseConfig);
