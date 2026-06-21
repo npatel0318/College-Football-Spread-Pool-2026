@@ -1155,6 +1155,12 @@ function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
 /* ------------------------------- picks tab --------------------------------- */
 
 function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName }) {
+  const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone"
+
+  useEffect(() => {
+    setViewMode("mine");
+  }, [selectedWeek]);
+
   if (selectedWeek == null) {
     return (
       <EmptyState
@@ -1207,6 +1213,39 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
         </div>
       )}
 
+      <div className="flex gap-2">
+        {[
+          { id: "mine", label: "My Picks" },
+          { id: "everyone", label: "Everyone's Picks" },
+        ].map((opt) => (
+          <button
+            key={opt.id}
+            onClick={() => setViewMode(opt.id)}
+            className="cfb-mono cfb-btn text-xs font-bold uppercase tracking-wider px-3 py-2 flex-1"
+            style={{
+              background: viewMode === opt.id ? COLORS.gold : "transparent",
+              color: viewMode === opt.id ? COLORS.ink : COLORS.chalkDim,
+              border: `1px solid ${viewMode === opt.id ? COLORS.gold : COLORS.lineStrong}`,
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {viewMode === "everyone" && !week.locked && (
+        <EmptyState
+          title="Picks are still hidden"
+          body="Everyone's picks stay private until the commissioner locks the week — check back after that."
+        />
+      )}
+
+      {viewMode === "everyone" && week.locked && (
+        <PicksGrid leagueMeta={leagueMeta} week={week} picksCache={picksCache[selectedWeek] || {}} slugToName={slugToName} />
+      )}
+
+      {viewMode === "mine" && (
+        <>
       {week.graded && (
         <div
           className="px-3 py-2 flex items-center gap-2"
@@ -1315,9 +1354,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
           })}
         </div>
       </div>
-
-      {week.locked && (
-        <PicksGrid leagueMeta={leagueMeta} week={week} picksCache={picksCache[selectedWeek] || {}} slugToName={slugToName} />
+        </>
       )}
     </div>
   );
