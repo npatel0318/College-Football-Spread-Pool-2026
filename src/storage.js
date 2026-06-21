@@ -32,6 +32,17 @@ function parseSharedKey(key) {
       slug: m[2],
     };
   }
+  m = key.match(/^wintotals:(\d+):board$/);
+  if (m) return { collection: "winTotalsBoards", id: m[1] };
+  m = key.match(/^wintotals:(\d+):picks:(.+)$/);
+  if (m) {
+    return {
+      collection: "winTotalsPicks",
+      id: `${m[1]}_${m[2]}`,
+      wtYear: Number(m[1]),
+      slug: m[2],
+    };
+  }
   throw new Error(`Unrecognized storage key: ${key}`);
 }
 
@@ -58,6 +69,10 @@ export const storage = {
       payload.week = parsed.week;
       payload.slug = parsed.slug;
     }
+    if (parsed.wtYear != null) {
+      payload.wtYear = parsed.wtYear;
+      payload.slug = parsed.slug;
+    }
     await setDoc(doc(db, parsed.collection, parsed.id), payload);
     return { key, value, shared: true };
   },
@@ -80,14 +95,25 @@ export const storage = {
         .map((k) => k.slice(LOCAL_PREFIX.length));
       return { keys, prefix, shared: false };
     }
-    // The only shared prefix this app ever lists is "week:{n}:picks:"
-    const m = prefix.match(/^week:(\d+):picks:$/);
-    if (!m) return { keys: [], prefix, shared: true };
-    const weekNum = Number(m[1]);
-    const snap = await getDocs(
-      query(collection(db, "picks"), where("week", "==", weekNum))
-    );
-    const keys = snap.docs.map((d) => `week:${weekNum}:picks:${d.data().slug}`);
-    return { keys, prefix, shared: true };
+    // Shared prefixes this app lists: "week:{n}:picks:" and "wintotals:{y}:picks:"
+    let m = prefix.match(/^week:(\d+):picks:$/);
+    if (m) {
+      const weekNum = Number(m[1]);
+      const snap = await getDocs(
+        query(collection(db, "picks"), where("week", "==", weekNum))
+      );
+      const keys = snap.docs.map((d) => `week:${weekNum}:picks:${d.data().slug}`);
+      return { keys, prefix, shared: true };
+    }
+    m = prefix.match(/^wintotals:(\d+):picks:$/);
+    if (m) {
+      const wtYear = Number(m[1]);
+      const snap = await getDocs(
+        query(collection(db, "winTotalsPicks"), where("wtYear", "==", wtYear))
+      );
+      const keys = snap.docs.map((d) => `wintotals:${wtYear}:picks:${d.data().slug}`);
+      return { keys, prefix, shared: true };
+    }
+    return { keys: [], prefix, shared: true };
   },
 };
