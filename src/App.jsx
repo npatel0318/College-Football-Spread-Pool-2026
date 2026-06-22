@@ -28,6 +28,7 @@ import {
   Send,
   Copy,
   Eye,
+  Clock,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -333,6 +334,9 @@ export default function App() {
 
   const [moneyData, setMoneyData] = useState(null);
   const [moneyLoading, setMoneyLoading] = useState(false);
+
+  const [historyData, setHistoryData] = useState({}); // year → parsed JSON
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const [commishUnlocked, setCommishUnlocked] = useState(false);
   const [passcodeInput, setPasscodeInput] = useState("");
@@ -1151,6 +1155,38 @@ export default function App() {
     if (r) setLeagueMeta(updated);
   }
 
+  /* ---------- history ---------- */
+
+  const loadHistoryYear = useCallback(async (year) => {
+    if (historyData[year]) return;
+    setHistoryLoading(true);
+    const raw = await safeGet(`history:${year}`, true);
+    if (raw) {
+      try {
+        setHistoryData((prev) => ({ ...prev, [year]: JSON.parse(raw) }));
+      } catch (e) {
+        setError("Couldn't parse history data — it may be corrupted.");
+      }
+    }
+    setHistoryLoading(false);
+  }, [historyData]);
+
+  useEffect(() => {
+    if (phase === "app" && activeTab === "history") {
+      loadHistoryYear(2025);
+    }
+  }, [phase, activeTab, loadHistoryYear]);
+
+  async function saveHistoryData(year, data) {
+    const r = await storage.set(`history:${year}`, JSON.stringify(data), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't save history data — check your connection and try again.");
+      return false;
+    }
+    setHistoryData((prev) => ({ ...prev, [year]: data }));
+    return true;
+  }
+
   /* ------------------------------- render ------------------------------- */
 
   const rootStyle = {
@@ -1263,6 +1299,7 @@ export default function App() {
           { id: "wintotals", label: "Win Totals", icon: Target },
           { id: "picks", label: "Picks", icon: CheckCircle2 },
           { id: "standings", label: "Standings", icon: Trophy },
+          { id: "history", label: "History", icon: Clock },
           { id: "commish", label: "Commish", icon: Shield },
         ].map((t) => {
           const Icon = t.icon;
@@ -1351,6 +1388,13 @@ export default function App() {
           />
         )}
 
+        {activeTab === "history" && (
+          <HistoryTab
+            historyData={historyData}
+            loading={historyLoading}
+          />
+        )}
+
         {activeTab === "commish" && (
           <CommishTab
             leagueMeta={leagueMeta}
@@ -1390,6 +1434,8 @@ export default function App() {
             loadStandings={loadStandings}
             finalizeSeasonPayouts={finalizeSeasonPayouts}
             unfinalizeSeasonPayouts={unfinalizeSeasonPayouts}
+            historyData={historyData}
+            saveHistoryData={saveHistoryData}
             resetAllData={resetAllData}
           />
         )}
@@ -2041,6 +2087,8 @@ function CommishTab({
   loadStandings,
   finalizeSeasonPayouts,
   unfinalizeSeasonPayouts,
+  historyData,
+  saveHistoryData,
   resetAllData,
 }) {
   const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults | money
@@ -2094,6 +2142,9 @@ function CommishTab({
         </SecondaryButton>
         <SecondaryButton onClick={() => setMode("money")} disabled={mode === "money"}>
           Money
+        </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("history")} disabled={mode === "history"}>
+          Import history
         </SecondaryButton>
       </div>
 
@@ -2172,6 +2223,10 @@ function CommishTab({
           finalizeSeasonPayouts={finalizeSeasonPayouts}
           unfinalizeSeasonPayouts={unfinalizeSeasonPayouts}
         />
+      )}
+
+      {mode === "history" && (
+        <HistoryImportManager historyData={historyData} saveHistoryData={saveHistoryData} />
       )}
 
       <div className="mt-6 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
@@ -4657,6 +4712,472 @@ function MoneySettingsManager({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────── HISTORY TAB ─────────────────────────────── */
+
+function HistoryTab({ historyData, loading }) {
+  const years = Object.keys(historyData).map(Number).sort((a, b) => b - a);
+  const [selectedYear, setSelectedYear] = useState(null);
+  const [view, setView] = useState("standings"); // standings | weeks | playoff | wintotals | money
+
+  useEffect(() => {
+    if (years.length && selectedYear === null) setSelectedYear(years[0]);
+  }, [years.length]);
+
+  const data = selectedYear ? historyData[selectedYear] : null;
+
+  if (loading && !years.length) return <Spinner label="Loading history..." />;
+
+  if (!years.length) {
+    return (
+      <EmptyState
+        title="No history yet"
+        body="The commissioner can import past season data under Commish → Import history."
+      />
+    );
+  }
+
+  return (
+    <div className="cfb-fade-in space-y-4">
+      <div className="cfb-display text-xl uppercase">Season History</div>
+
+      {years.length > 1 && (
+        <div className="flex gap-2">
+          {years.map((y) => (
+            <button
+              key={y}
+              onClick={() => setSelectedYear(y)}
+              className="cfb-mono cfb-btn text-xs font-bold px-3 py-2"
+              style={{
+                background: selectedYear === y ? COLORS.gold : "transparent",
+                color: selectedYear === y ? COLORS.ink : COLORS.chalkDim,
+                border: `1px solid ${selectedYear === y ? COLORS.gold : COLORS.lineStrong}`,
+              }}
+            >
+              {y}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {data && (
+        <>
+          <div className="flex overflow-x-auto cfb-tab-nav" style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+            {[
+              { id: "standings", label: "Standings" },
+              { id: "weeks", label: "Weeks" },
+              { id: "playoff", label: "Playoff" },
+              { id: "wintotals", label: "Win Totals" },
+              { id: "money", label: "Money" },
+            ].map((v) => (
+              <button
+                key={v.id}
+                onClick={() => setView(v.id)}
+                className="cfb-mono cfb-btn flex-shrink-0 text-xs font-bold uppercase tracking-wider px-4 py-2.5"
+                style={{
+                  color: view === v.id ? COLORS.goldBright : COLORS.chalkDim,
+                  borderBottom: view === v.id ? `2px solid ${COLORS.gold}` : "2px solid transparent",
+                  background: view === v.id ? "rgba(217,164,65,0.06)" : "transparent",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+
+          {view === "standings" && <HistoryStandings data={data} />}
+          {view === "weeks" && <HistoryWeeks data={data} />}
+          {view === "playoff" && <HistoryPlayoff data={data} />}
+          {view === "wintotals" && <HistoryWinTotals data={data} />}
+          {view === "money" && <HistoryMoney data={data} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+function HistoryStandings({ data }) {
+  const rows = data.finalStandings || [];
+  return (
+    <div className="space-y-3">
+      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+        Final {data.year} season standings. "Game picks" = weekly spreads only. "Total" includes win totals and CFP picks.
+      </div>
+      {data.seasonPlaces && (
+        <div className="flex gap-3 flex-wrap">
+          {[["1st", COLORS.gold], ["2nd", COLORS.chalkDim], ["3rd", "#CD7F32"]].map(([place, color]) => {
+            const winner = Object.entries(data.seasonPlaces || {}).find(([, p]) => p === place)?.[0];
+            const payout = data.seasonPayouts?.[winner];
+            if (!winner) return null;
+            return (
+              <div key={place} className="px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${color}` }}>
+                <div className="cfb-mono text-xs uppercase" style={{ color }}>{place} place</div>
+                <div className="font-semibold text-sm" style={{ color: COLORS.chalk }}>{winner}</div>
+                {payout != null && <div className="cfb-mono text-xs" style={{ color }}>{fmtMoney(payout)}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>game picks</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <td className="px-3 py-2" style={{ color: i === 0 ? COLORS.gold : COLORS.muted }}>
+                  {i === 0 ? <Trophy size={14} /> : i + 1}
+                </td>
+                <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>
+                  {r.name}
+                  {data.seasonPlaces?.[r.name] && (
+                    <span className="cfb-mono text-xs ml-1.5" style={{ color: COLORS.gold }}>
+                      ({data.seasonPlaces[r.name]})
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right whitespace-nowrap">{r.gameWins}-{r.gameLosses}</td>
+                <td className="px-3 py-2 text-right font-bold whitespace-nowrap">{r.totalWins}-{r.totalLosses}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function HistoryWeeks({ data }) {
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const week = data.weeks?.[selectedIdx];
+  if (!week) return null;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex overflow-x-auto cfb-scroll gap-1.5 pb-1">
+        {data.weeks.map((w, i) => (
+          <button
+            key={i}
+            onClick={() => setSelectedIdx(i)}
+            className="cfb-mono cfb-btn flex-shrink-0 text-xs font-bold px-2.5 py-1.5"
+            style={{
+              background: selectedIdx === i ? COLORS.gold : "transparent",
+              color: selectedIdx === i ? COLORS.ink : COLORS.chalkDim,
+              border: `1px solid ${selectedIdx === i ? COLORS.gold : COLORS.lineStrong}`,
+            }}
+          >
+            {w.label === "Championships" ? "Champ" : w.label === "Bowl Games" ? "Bowls" : w.label.replace("Week ", "Wk ")}
+          </button>
+        ))}
+      </div>
+
+      {/* Games + picks grid */}
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDeep, color: COLORS.chalkDim, minWidth: 160 }}>
+                game
+              </th>
+              {data.members.map((m) => (
+                <th key={m} className="text-left px-2 py-1.5 whitespace-nowrap" style={{ color: COLORS.chalkDim }}>
+                  {m.split(" ")[0]}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {week.games.map((g, gi) => (
+              <tr key={gi} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {g.game}
+                </td>
+                {data.members.map((m) => {
+                  const pick = week.members[m]?.picks?.[gi];
+                  const winner = g.winner;
+                  let color = COLORS.chalkDim;
+                  if (pick && winner) {
+                    color = pick === winner ? COLORS.goldBright : COLORS.redBright;
+                  }
+                  return (
+                    <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
+                      {pick || "—"}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+            {/* Summary rows */}
+            <tr style={{ borderTop: `2px solid ${COLORS.lineStrong}`, background: COLORS.fieldDeep }}>
+              <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDeep, color: COLORS.muted }}>record</td>
+              {data.members.map((m) => {
+                const md = week.members[m];
+                const missed = md?.missed;
+                return (
+                  <td key={m} className="px-2 py-1.5 whitespace-nowrap font-semibold" style={{ color: missed ? COLORS.muted : COLORS.chalk }}>
+                    {missed ? "MISSED" : `${md?.wins ?? 0}-${md?.losses ?? 0}`}
+                  </td>
+                );
+              })}
+            </tr>
+            <tr style={{ borderTop: `1px solid ${COLORS.line}` }}>
+              <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
+                <span className="inline-flex items-center gap-1"><Flame size={11} style={{ color: COLORS.gold }} /> lock</span>
+              </td>
+              {data.members.map((m) => {
+                const lr = week.members[m]?.lockResult ?? 0;
+                return (
+                  <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color: lr > 0 ? COLORS.goldBright : lr < 0 ? COLORS.redBright : COLORS.muted }}>
+                    {lr !== 0 ? fmtMoney(lr) : "—"}
+                  </td>
+                );
+              })}
+            </tr>
+            <tr style={{ borderTop: `1px solid ${COLORS.line}` }}>
+              <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>underdog</td>
+              {data.members.map((m) => {
+                const ud = week.members[m]?.underdogPick;
+                return (
+                  <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color: COLORS.chalkDim }}>
+                    {ud || "—"}
+                  </td>
+                );
+              })}
+            </tr>
+            <tr style={{ borderTop: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep }}>
+              <td className="px-2 py-1.5 sticky left-0 font-bold" style={{ background: COLORS.fieldDeep, color: COLORS.chalk }}>$ week</td>
+              {data.members.map((m) => {
+                const amt = week.members[m]?.weekMoney ?? 0;
+                return (
+                  <td key={m} className="px-2 py-1.5 whitespace-nowrap font-bold" style={{ color: amt > 0 ? COLORS.goldBright : amt < 0 ? COLORS.redBright : COLORS.muted }}>
+                    {amt !== 0 ? fmtMoney(amt) : "—"}
+                  </td>
+                );
+              })}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function HistoryPlayoff({ data }) {
+  const picks = data.playoffPicks || {};
+  const members = data.members || [];
+  return (
+    <div className="space-y-3">
+      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+        {data.year} CFP picks. 3 from Tier 1, 2 from Tier 2, 1 from Tier 3. Teams that actually made the playoff shown in gold.
+      </div>
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+              {[1,2,3,4,5,6].map((n) => (
+                <th key={n} className="text-left px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim }}>pick {n}</th>
+              ))}
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>record</th>
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((m) => {
+              const p = picks[m];
+              if (!p) return null;
+              return (
+                <tr key={m} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{m}</td>
+                  {(p.picks || []).map((pick, i) => (
+                    <td key={i} className="px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim }}>{pick || "—"}</td>
+                  ))}
+                  <td className="px-3 py-2 text-right font-semibold whitespace-nowrap" style={{ color: p.wins > p.losses ? COLORS.goldBright : COLORS.chalk }}>
+                    {p.wins}-{p.losses}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function HistoryWinTotals({ data }) {
+  const picks = data.winTotalsPicks || {};
+  const members = data.members || [];
+  return (
+    <div className="space-y-3">
+      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+        {data.year} win total over/under picks. 6 picks per person across conferences.
+      </div>
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+              {[1,2,3,4,5,6].map((n) => (
+                <th key={n} className="text-left px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim }}>pick {n}</th>
+              ))}
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>record</th>
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((m) => {
+              const p = picks[m];
+              if (!p) return null;
+              return (
+                <tr key={m} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{m}</td>
+                  {(p.picks || []).map((pick, i) => (
+                    <td key={i} className="px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim, fontSize: "0.7rem" }}>{pick || "—"}</td>
+                  ))}
+                  <td className="px-3 py-2 text-right font-semibold whitespace-nowrap" style={{ color: p.wins > p.losses ? COLORS.goldBright : COLORS.chalk }}>
+                    {p.wins}-{p.losses}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function HistoryMoney({ data }) {
+  const members = data.members || [];
+  const payments = data.finalPayments || {};
+  const withSeason = data.finalWithSeasonPayouts || {};
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
+        <div className="px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+          <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.chalkDim }}>Total pot</div>
+          <div className="text-lg font-bold cfb-mono">{fmtMoney(data.pot || 0)}</div>
+        </div>
+      </div>
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weekly + locks</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>season payout</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...members].sort((a, b) => (withSeason[b] || 0) - (withSeason[a] || 0)).map((m) => {
+              const yearly = payments[m] ?? 0;
+              const total = withSeason[m] ?? yearly;
+              const seasonBonus = total - yearly;
+              return (
+                <tr key={m} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>
+                    {m}
+                    {data.seasonPlaces?.[m] && (
+                      <span className="cfb-mono text-xs ml-1.5" style={{ color: COLORS.gold }}>({data.seasonPlaces[m]})</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right" style={{ color: yearly > 0 ? COLORS.goldBright : yearly < 0 ? COLORS.redBright : COLORS.chalkDim }}>
+                    {fmtMoney(yearly)}
+                  </td>
+                  <td className="px-3 py-2 text-right" style={{ color: seasonBonus > 0 ? COLORS.goldBright : COLORS.muted }}>
+                    {seasonBonus > 0 ? fmtMoney(seasonBonus) : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold" style={{ color: total > 0 ? COLORS.goldBright : total < 0 ? COLORS.redBright : COLORS.chalk }}>
+                    {fmtMoney(total)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="text-xs" style={{ color: COLORS.muted }}>
+        "Weekly + locks" = net from weekly winner/loser and lock results across the season, before the season-end placement payout.
+      </div>
+    </div>
+  );
+}
+
+function HistoryImportManager({ historyData, saveHistoryData }) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [err, setErr] = useState(null);
+  const existingYears = Object.keys(historyData).map(Number).sort((a, b) => a - b);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErr(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!parsed.year || !parsed.members || !parsed.weeks) {
+        setErr("This doesn't look like a valid season history file. Make sure you're uploading the history JSON I generated.");
+        setBusy(false);
+        return;
+      }
+      const ok = await saveHistoryData(parsed.year, parsed);
+      if (ok) setNotice(`${parsed.year} season imported successfully — it'll now appear on the History tab.`);
+    } catch (ex) {
+      setErr(`Couldn't parse the file: ${ex.message}`);
+    }
+    setBusy(false);
+    e.target.value = "";
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="cfb-display text-lg uppercase">Import season history</div>
+      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+        Upload the <span className="cfb-mono">history_2025.json</span> file Claude generated from your spreadsheet.
+        This creates a read-only archive on the History tab for all members.
+      </div>
+
+      {existingYears.length > 0 && (
+        <div className="text-xs" style={{ color: COLORS.muted }}>
+          Already imported: {existingYears.join(", ")}. Uploading the same year again will overwrite it.
+        </div>
+      )}
+
+      {err && <Banner onDismiss={() => setErr(null)}>{err}</Banner>}
+      {notice && (
+        <div className="px-3 py-2 text-sm" style={{ background: "rgba(217,164,65,0.1)", border: `1px solid ${COLORS.gold}`, color: COLORS.goldBright }}>
+          {notice}
+        </div>
+      )}
+
+      <label
+        className="cfb-mono cfb-btn text-xs font-bold uppercase tracking-wider px-4 py-2.5 flex items-center gap-2 cursor-pointer"
+        style={{
+          background: "transparent",
+          border: `1px solid ${COLORS.lineStrong}`,
+          color: busy ? COLORS.muted : COLORS.chalk,
+          opacity: busy ? 0.6 : 1,
+          display: "inline-flex",
+        }}
+      >
+        <Upload size={13} />
+        {busy ? "Importing..." : "Choose history_2025.json"}
+        <input type="file" accept=".json" onChange={handleFile} disabled={busy} style={{ display: "none" }} />
+      </label>
     </div>
   );
 }

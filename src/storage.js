@@ -54,6 +54,8 @@ function parseSharedKey(key) {
       slug: m[2],
     };
   }
+  m = key.match(/^history:(\d+)$/);
+  if (m) return { collection: "historicalSeasons", id: m[1] };
   throw new Error(`Unrecognized storage key: ${key}`);
 }
 
