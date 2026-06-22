@@ -55,6 +55,7 @@ const FONT_CSS = `
 .cfb-mono { font-family: 'JetBrains Mono', monospace; }
 .cfb-scroll::-webkit-scrollbar { height: 6px; width: 6px; }
 .cfb-scroll::-webkit-scrollbar-thumb { background: ${COLORS.lineStrong}; border-radius: 3px; }
+.cfb-tab-nav::-webkit-scrollbar { display: none; }
 .cfb-btn { transition: transform 0.08s ease, background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease; }
 .cfb-btn:active { transform: scale(0.98); }
 .cfb-fade-in { animation: cfbFadeIn 0.25s ease; }
@@ -1246,7 +1247,16 @@ export default function App() {
       </div>
 
       {/* tab nav */}
-      <div className="flex" style={{ background: COLORS.fieldDark, borderBottom: `1px solid ${COLORS.line}` }}>
+      <div
+        className="flex overflow-x-auto cfb-tab-nav"
+        style={{
+          background: COLORS.fieldDark,
+          borderBottom: `1px solid ${COLORS.line}`,
+          scrollbarWidth: "none",
+          msOverflowStyle: "none",
+          WebkitOverflowScrolling: "touch",
+        }}
+      >
         {[
           { id: "money", label: "Money", icon: DollarSign },
           { id: "playoff", label: "Playoff", icon: Award },
@@ -1261,14 +1271,15 @@ export default function App() {
             <button
               key={t.id}
               onClick={() => setActiveTab(t.id)}
-              className="cfb-mono cfb-btn flex-1 flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wider py-3"
+              className="cfb-mono cfb-btn flex-shrink-0 flex items-center justify-center gap-1 text-xs font-bold uppercase tracking-wider py-3 px-4"
               style={{
                 color: active ? COLORS.goldBright : COLORS.chalkDim,
                 borderBottom: active ? `2px solid ${COLORS.gold}` : "2px solid transparent",
                 background: active ? "rgba(217,164,65,0.06)" : "transparent",
+                whiteSpace: "nowrap",
               }}
             >
-              <Icon size={14} />
+              <Icon size={13} />
               {t.label}
             </button>
           );
