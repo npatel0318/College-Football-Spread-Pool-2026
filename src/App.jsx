@@ -246,20 +246,51 @@ function computePlayoffTiers(teams) {
 
 async function safeGet(key, shared) {
   try {
-    const r = await storage.get(key, shared);
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), 8000)
+    );
+    const r = await Promise.race([storage.get(key, shared), timeout]);
     return r ? r.value : null;
   } catch (e) {
     return null;
   }
 }
 
+async function safeList(prefix, shared) {
+  try {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), 8000)
+    );
+    const r = await Promise.race([storage.list(prefix, shared), timeout]);
+    return r?.keys || [];
+  } catch (e) {
+    return [];
+  }
+}
+
 /* -------------------------------- small UI -------------------------------- */
 
 function Spinner({ label }) {
+  const [showRetry, setShowRetry] = useState(false);
+  useEffect(() => {
+    const id = setTimeout(() => setShowRetry(true), 6000);
+    return () => clearTimeout(id);
+  }, []);
   return (
-    <div className="flex items-center gap-2" style={{ color: COLORS.chalkDim }}>
-      <RefreshCw size={14} className="animate-spin" />
-      <span className="text-sm cfb-mono">{label || "Loading..."}</span>
+    <div className="flex flex-col items-start gap-3">
+      <div className="flex items-center gap-2" style={{ color: COLORS.chalkDim }}>
+        <RefreshCw size={14} className="animate-spin" />
+        <span className="text-sm cfb-mono">{label || "Loading..."}</span>
+      </div>
+      {showRetry && (
+        <button
+          onClick={() => window.location.reload()}
+          className="cfb-mono text-xs px-3 py-2 cfb-btn"
+          style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalk }}
+        >
+          Taking too long? Tap to reload
+        </button>
+      )}
     </div>
   );
 }
@@ -484,8 +515,8 @@ export default function App() {
       const weekObj = raw ? JSON.parse(raw) : null;
       setWeekCache((prev) => ({ ...prev, [weekNum]: weekObj }));
       if (withPicks) {
-        const list = await storage.list(`week:${weekNum}:picks:`, true).catch(() => null);
-        const keys = list?.keys || [];
+        const list = await safeList(`week:${weekNum}:picks:`, true);
+        const keys = list;
         const picksObj = {};
         for (const k of keys) {
           const raw2 = await safeGet(k, true);
@@ -772,8 +803,8 @@ export default function App() {
       const board = raw ? JSON.parse(raw) : null;
       setWinTotalsCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
-        const list = await storage.list(`wintotals:${year}:picks:`, true).catch(() => null);
-        const keys = list?.keys || [];
+        const list = await safeList(`wintotals:${year}:picks:`, true);
+        const keys = list;
         const picksObj = {};
         for (const k of keys) {
           const raw2 = await safeGet(k, true);
@@ -871,8 +902,8 @@ export default function App() {
       const board = raw ? JSON.parse(raw) : null;
       setPlayoffCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
-        const list = await storage.list(`playoff:${year}:picks:`, true).catch(() => null);
-        const keys = list?.keys || [];
+        const list = await safeList(`playoff:${year}:picks:`, true);
+        const keys = list;
         const picksObj = {};
         for (const k of keys) {
           const raw2 = await safeGet(k, true);
@@ -1038,8 +1069,8 @@ export default function App() {
       if (!raw) continue;
       const weekObj = JSON.parse(raw);
       if (!weekObj.graded) continue;
-      const list = await storage.list(`week:${w}:picks:`, true).catch(() => null);
-      const keys = list?.keys || [];
+      const list = await safeList(`week:${w}:picks:`, true);
+      const keys = list;
       const weekWins = {};
       for (const k of keys) {
         const raw2 = await safeGet(k, true);
@@ -1081,8 +1112,8 @@ export default function App() {
         const board = JSON.parse(raw);
         const teamsById = {};
         board.teams.forEach((t) => (teamsById[t.id] = t));
-        const list = await storage.list(`wintotals:${wtYear}:picks:`, true).catch(() => null);
-        const keys = list?.keys || [];
+        const list = await safeList(`wintotals:${wtYear}:picks:`, true);
+        const keys = list;
         for (const k of keys) {
           const raw2 = await safeGet(k, true);
           if (!raw2) continue;
@@ -1115,8 +1146,8 @@ export default function App() {
         const board = JSON.parse(raw);
         const teamsById = {};
         board.teams.forEach((t) => (teamsById[t.id] = t));
-        const list = await storage.list(`playoff:${pYear}:picks:`, true).catch(() => null);
-        const keys = list?.keys || [];
+        const list = await safeList(`playoff:${pYear}:picks:`, true);
+        const keys = list;
         for (const k of keys) {
           const raw2 = await safeGet(k, true);
           if (!raw2) continue;
@@ -1172,8 +1203,8 @@ export default function App() {
       if (!raw) continue;
       const weekObj = JSON.parse(raw);
       if (!weekObj.graded) continue;
-      const list = await storage.list(`week:${w}:picks:`, true).catch(() => null);
-      const keys = list?.keys || [];
+      const list = await safeList(`week:${w}:picks:`, true);
+      const keys = list;
       const weekWins = {}; // member -> wins this week (only members who played)
       const picksByMember = {};
       const allPicksByMember = {}; // includes members who only submitted an underdog pick
