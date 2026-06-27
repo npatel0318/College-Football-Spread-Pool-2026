@@ -34,19 +34,19 @@ import {
 /* ----------------------------- design tokens ----------------------------- */
 
 const COLORS = {
-  fieldDeep: "#0E2516",
-  fieldDark: "#13321D",
-  fieldMid: "#1F5C32",
-  chalk: "#F5F1E6",
-  chalkDim: "#CFC9B8",
+  fieldDeep: "#0c0c0e",
+  fieldDark: "#141417",
+  fieldMid: "#1e1e24",
+  chalk: "#f0f0f2",
+  chalkDim: "#a8a8b8",
   gold: "#D9A441",
   goldBright: "#EFC169",
   red: "#B3372A",
   redBright: "#D14B3C",
-  ink: "#16160F",
-  muted: "#9C9586",
-  line: "rgba(245,241,230,0.14)",
-  lineStrong: "rgba(245,241,230,0.28)",
+  ink: "#0c0c0e",
+  muted: "#666678",
+  line: "rgba(255,255,255,0.08)",
+  lineStrong: "rgba(255,255,255,0.16)",
 };
 
 const FONT_CSS = `
@@ -1391,7 +1391,7 @@ export default function App() {
 
   const rootStyle = {
     minHeight: "100%",
-    background: `linear-gradient(180deg, ${COLORS.fieldDark} 0%, ${COLORS.fieldDeep} 100%)`,
+    background: COLORS.fieldDeep,
     color: COLORS.chalk,
   };
 
