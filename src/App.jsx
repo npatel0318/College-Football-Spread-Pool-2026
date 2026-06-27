@@ -535,7 +535,7 @@ export default function App() {
 
   /* ---------- commissioner actions ---------- */
 
-  async function saveWeekGames(weekNum, games, locked) {
+  async function saveWeekGames(weekNum, games, locked, weekDates) {
     const existing = weekCache[weekNum];
     const payload = {
       weekNum,
@@ -543,6 +543,7 @@ export default function App() {
       locked,
       showPicksEarly: existing?.showPicksEarly || false,
       graded: existing?.graded && existing.games.length === games.length ? existing.graded : false,
+      weekDates: weekDates || existing?.weekDates || null,
     };
     // preserve scores for games whose id already existed
     if (existing) {
@@ -606,6 +607,109 @@ export default function App() {
     }
     setWeekCache((prev) => ({ ...prev, [weekNum]: payload }));
     return true;
+  }
+
+  /* ---------- auto-grade ---------- */
+
+  async function fetchEspnScoresForDates(fromDate, toDate) {
+    const dates = getDatesInRange(fromDate, toDate);
+    const espnGames = [];
+    for (const yyyymmdd of dates) {
+      try {
+        const url = `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=${yyyymmdd}&limit=200`;
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const data = await res.json();
+        for (const event of data.events || []) {
+          const comp = event.competitions?.[0];
+          if (!comp) continue;
+          const homeComp = comp.competitors?.find((c) => c.homeAway === "home");
+          const awayComp = comp.competitors?.find((c) => c.homeAway === "away");
+          if (!homeComp || !awayComp) continue;
+          espnGames.push({
+            homeTeam: homeComp.team?.displayName || "",
+            awayTeam: awayComp.team?.displayName || "",
+            homeScore: homeComp.score != null ? Number(homeComp.score) : null,
+            awayScore: awayComp.score != null ? Number(awayComp.score) : null,
+            completed: comp.status?.type?.completed === true,
+            statusName: comp.status?.type?.name || "",
+          });
+        }
+      } catch (_) { /* skip failed dates */ }
+    }
+    return espnGames;
+  }
+
+  function matchGameToEspn(game, espnGames) {
+    const homeLower = (game.home || "").toLowerCase();
+    const awayLower = (game.away || "").toLowerCase();
+    // 1. Exact match on both teams
+    let match = espnGames.find(
+      (e) => e.homeTeam.toLowerCase() === homeLower && e.awayTeam.toLowerCase() === awayLower
+    );
+    if (match) return match;
+    // 2. Exact home team match (away might differ slightly)
+    match = espnGames.find((e) => e.homeTeam.toLowerCase() === homeLower);
+    if (match) return match;
+    // 3. First-word school name match (strips mascot)
+    const homeFirst = homeLower.split(" ")[0];
+    const awayFirst = awayLower.split(" ")[0];
+    match = espnGames.find(
+      (e) => e.homeTeam.toLowerCase().startsWith(homeFirst) && e.awayTeam.toLowerCase().startsWith(awayFirst)
+    );
+    if (match) return match;
+    return null;
+  }
+
+  async function autoGradeWeek(weekNum) {
+    const week = weekCache[weekNum];
+    if (!week) return { status: "error", message: "Week data not loaded." };
+    if (!week.weekDates?.from || !week.weekDates?.to) {
+      return { status: "no-dates", message: "No game dates stored for this week. Set dates in the Games tab and re-save." };
+    }
+    let espnGames;
+    try {
+      espnGames = await fetchEspnScoresForDates(week.weekDates.from, week.weekDates.to);
+    } catch (e) {
+      return { status: "error", message: "Couldn't reach ESPN — check your connection and try again." };
+    }
+
+    const matched = [];
+    const unmatched = [];
+    for (const game of week.games) {
+      const espn = matchGameToEspn(game, espnGames);
+      if (espn) {
+        matched.push({ game, espn });
+      } else {
+        unmatched.push(game);
+      }
+    }
+
+    const notFinal = matched.filter((m) => !m.espn.completed);
+    if (notFinal.length > 0) {
+      return {
+        status: "pending",
+        message: `${notFinal.length} game${notFinal.length === 1 ? "" : "s"} still in progress — check back once all games are final.`,
+        completedCount: matched.length - notFinal.length,
+        totalCount: week.games.length,
+      };
+    }
+    if (unmatched.length > 0) {
+      return {
+        status: "partial",
+        message: `Couldn't find scores for ${unmatched.length} game${unmatched.length === 1 ? "" : "s"}: ${unmatched.map((g) => `${g.away} @ ${g.home}`).join(", ")}. Grade those manually.`,
+        unmatched,
+      };
+    }
+
+    // All matched and final — save automatically
+    const gamesWithScores = week.games.map((game) => {
+      const m = matched.find((x) => x.game.id === game.id);
+      return m ? { ...game, homeScore: m.espn.homeScore, awayScore: m.espn.awayScore } : game;
+    });
+    const ok = await saveResults(weekNum, gamesWithScores);
+    if (!ok) return { status: "error", message: "Scores fetched but couldn't save — try again." };
+    return { status: "graded", message: `Week ${weekNum} auto-graded: all ${week.games.length} games matched and saved.` };
   }
 
   /* ---------- win totals ---------- */
@@ -1417,6 +1521,7 @@ export default function App() {
             toggleLock={toggleLock}
             toggleShowPicksEarly={toggleShowPicksEarly}
             saveResults={saveResults}
+            autoGradeWeek={autoGradeWeek}
             winTotalsCache={winTotalsCache}
             loadWinTotals={loadWinTotals}
             saveWinTotalsBoard={saveWinTotalsBoard}
@@ -2078,6 +2183,7 @@ function CommishTab({
   toggleLock,
   toggleShowPicksEarly,
   saveResults,
+  autoGradeWeek,
   winTotalsCache,
   loadWinTotals,
   saveWinTotalsBoard,
@@ -2177,6 +2283,7 @@ function CommishTab({
           weekCache={weekCache}
           loadWeek={loadWeek}
           saveResults={saveResults}
+          autoGradeWeek={autoGradeWeek}
           picksCache={picksCache}
           saveUnderdogResults={saveUnderdogResults}
         />
@@ -2382,6 +2489,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const [oddsTo, setOddsTo] = useState(isoDateInput(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)));
   const [oddsBusy, setOddsBusy] = useState(false);
   const [oddsError, setOddsError] = useState(null);
+  const [weekDatesFrom, setWeekDatesFrom] = useState("");
+  const [weekDatesTo, setWeekDatesTo] = useState("");
 
   const [shareMessage, setShareMessage] = useState("");
   const [shareCopied, setShareCopied] = useState(false);
@@ -2600,6 +2709,9 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           "No games with posted spreads in that date range. Sportsbooks usually post lines a few days before kickoff — try again closer to game day, or widen the date range."
         );
       } else {
+        // Store these dates so Results can auto-fetch scores later
+        setWeekDatesFrom(oddsFrom);
+        setWeekDatesTo(oddsTo);
         setImportPreview(withNetworks);
         const sel = {};
         withNetworks.forEach((_, i) => (sel[i] = true));
@@ -2625,6 +2737,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     } else if (selectedWeek != null && weekCache[selectedWeek] && !loadedExisting) {
       setGames(weekCache[selectedWeek].games.map((g) => ({ ...g, spread: String(g.spread) })));
       setWeekNumInput(String(selectedWeek));
+      const wd = weekCache[selectedWeek].weekDates;
+      if (wd) { setWeekDatesFrom(wd.from || ""); setWeekDatesTo(wd.to || ""); }
       setLoadedExisting(true);
     }
   }, [selectedWeek, weekCache, loadWeek, loadedExisting]);
@@ -3063,6 +3177,27 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         </div>
       )}
 
+      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
+        <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.chalkDim }}>
+          Game week dates <span style={{ fontWeight: "normal", textTransform: "none", letterSpacing: 0, color: COLORS.muted }}>— used to auto-fetch scores after games are played</span>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <div className="cfb-mono text-xs mb-1" style={{ color: COLORS.muted }}>from</div>
+            <FieldInput type="date" value={weekDatesFrom} onChange={setWeekDatesFrom} />
+          </div>
+          <div>
+            <div className="cfb-mono text-xs mb-1" style={{ color: COLORS.muted }}>to</div>
+            <FieldInput type="date" value={weekDatesTo} onChange={setWeekDatesTo} />
+          </div>
+        </div>
+        {!weekDatesFrom && (
+          <div className="text-xs mt-1.5" style={{ color: COLORS.muted }}>
+            Auto-fills when you import via The Odds API. Set manually if you enter games by hand.
+          </div>
+        )}
+      </div>
+
       <div className="space-y-2">
         {games.map((g, idx) => (
           <div key={g.id} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
@@ -3138,7 +3273,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           setBusy(true);
           const wk = Number(weekNumInput);
           const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
-          const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false);
+          const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
+          const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false, weekDates);
           setBusy(false);
           if (ok) setSelectedWeek(wk);
         }}
@@ -3149,11 +3285,13 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   );
 }
 
-function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, picksCache, saveUnderdogResults }) {
+function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGradeWeek, picksCache, saveUnderdogResults }) {
   const [selectedWeek, setSelectedWeek] = useState(leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) : null);
   const [scores, setScores] = useState({});
   const [busy, setBusy] = useState(false);
-  const [udStatuses, setUdStatuses] = useState({}); // slug -> "yes" | "no" | ""
+  const [autoStatus, setAutoStatus] = useState(null); // {status, message, ...}
+  const [autoRunning, setAutoRunning] = useState(false);
+  const [udStatuses, setUdStatuses] = useState({});
   const [udBusy, setUdBusy] = useState(false);
   const week = selectedWeek != null ? weekCache[selectedWeek] : null;
   const weekPicks = selectedWeek != null ? picksCache[selectedWeek] || {} : {};
@@ -3164,6 +3302,7 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, picksCac
     }
   }, [selectedWeek, weekCache, loadWeek]);
 
+  // Sync score inputs from cached/auto-graded week data
   useEffect(() => {
     if (week) {
       const init = {};
@@ -3172,7 +3311,19 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, picksCac
       });
       setScores(init);
     }
-  }, [week?.weekNum]);
+  }, [week?.weekNum, week?.graded]);
+
+  // Auto-grade: fires when a locked, ungraded week loads
+  useEffect(() => {
+    if (!week || !week.locked || week.graded || autoRunning || autoStatus) return;
+    (async () => {
+      setAutoRunning(true);
+      setAutoStatus({ status: "running", message: "Fetching scores from ESPN..." });
+      const result = await autoGradeWeek(selectedWeek);
+      setAutoStatus(result);
+      setAutoRunning(false);
+    })();
+  }, [week?.weekNum, week?.locked, week?.graded]);
 
   useEffect(() => {
     const init = {};
@@ -3182,8 +3333,12 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, picksCac
       }
     });
     setUdStatuses(init);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedWeek, Object.keys(weekPicks).length]);
+
+  // Reset auto-status when week changes so it re-triggers
+  useEffect(() => {
+    setAutoStatus(null);
+  }, [selectedWeek]);
 
   if (!leagueMeta.weeks.length) {
     return <EmptyState title="No weeks yet" body="Create a week under Manage games first." />;
@@ -3206,8 +3361,55 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, picksCac
 
       {week && (
         <>
-          {week.graded && (
-            <Banner kind="info">This week is fully graded. Edit and re-save if a score needs correcting.</Banner>
+          {/* Auto-grade status */}
+          {autoStatus?.status === "running" && (
+            <div className="px-3 py-2 flex items-center gap-2 text-sm" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}`, color: COLORS.chalkDim }}>
+              <RefreshCw size={14} className="animate-spin flex-shrink-0" />
+              {autoStatus.message}
+            </div>
+          )}
+          {autoStatus?.status === "graded" && (
+            <div className="px-3 py-2 flex items-center gap-2 text-sm" style={{ background: "rgba(217,164,65,0.1)", border: `1px solid ${COLORS.gold}`, color: COLORS.goldBright }}>
+              <CheckCircle2 size={14} className="flex-shrink-0" />
+              {autoStatus.message}
+              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs ml-auto opacity-60 hover:opacity-100">re-fetch</button>
+            </div>
+          )}
+          {autoStatus?.status === "pending" && (
+            <div className="px-3 py-2 space-y-1" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}>
+              <div className="text-sm flex items-center gap-2" style={{ color: COLORS.chalkDim }}>
+                <RefreshCw size={14} className="flex-shrink-0" /> {autoStatus.message}
+              </div>
+              <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                {autoStatus.completedCount} of {autoStatus.totalCount} games final so far.
+              </div>
+              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>check again</button>
+            </div>
+          )}
+          {autoStatus?.status === "partial" && (
+            <div className="px-3 py-2 space-y-1" style={{ background: "rgba(179,55,42,0.1)", border: `1px solid ${COLORS.red}` }}>
+              <div className="text-sm" style={{ color: COLORS.redBright }}>{autoStatus.message}</div>
+              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>try again</button>
+            </div>
+          )}
+          {autoStatus?.status === "error" && (
+            <div className="px-3 py-2 space-y-1" style={{ background: "rgba(179,55,42,0.1)", border: `1px solid ${COLORS.red}` }}>
+              <div className="text-sm" style={{ color: COLORS.redBright }}>{autoStatus.message}</div>
+              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>retry</button>
+            </div>
+          )}
+          {autoStatus?.status === "no-dates" && (
+            <div className="px-3 py-2 text-sm" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}>
+              {autoStatus.message}
+            </div>
+          )}
+          {!week.locked && (
+            <div className="px-3 py-2 text-sm" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}`, color: COLORS.chalkDim }}>
+              Lock the week first — results can only be entered once picks are locked.
+            </div>
+          )}
+          {week.graded && !autoStatus && (
+            <Banner kind="info">This week is fully graded. Edit scores below and re-save if anything needs correcting.</Banner>
           )}
           <div className="space-y-2">
             {week.games.map((g, idx) => (
