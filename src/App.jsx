@@ -1384,6 +1384,7 @@ export default function App() {
     if (phase === "app" && activeTab === "history") {
       loadHistoryYear(2025);
       loadHistoryYear(2024);
+      loadHistoryYear(2023);
     }
   }, [phase, activeTab, loadHistoryYear]);
 
@@ -5796,6 +5797,16 @@ function HistoryWeeks({ data }) {
 function HistoryPlayoff({ data }) {
   const picks = data.playoffPicks || {};
   const members = data.members || [];
+  const hasPicks = Object.values(picks).some((p) => p?.picks?.length);
+
+  if (!hasPicks) {
+    return (
+      <EmptyState
+        title="No playoff picks"
+        body={`${data.year} predates the expanded CFP — no playoff picks were part of the pool that year.`}
+      />
+    );
+  }
   return (
     <div className="space-y-3">
       <div className="text-sm" style={{ color: COLORS.chalkDim }}>
@@ -5838,18 +5849,20 @@ function HistoryPlayoff({ data }) {
 function HistoryWinTotals({ data }) {
   const picks = data.winTotalsPicks || {};
   const members = data.members || [];
+  // Pick count varies by year: 2023=10, 2024/2025=6
+  const maxPicks = Math.max(...Object.values(picks).map((p) => (p.picks || []).length), 6);
   return (
     <div className="space-y-3">
       <div className="text-sm" style={{ color: COLORS.chalkDim }}>
-        {data.year} win total over/under picks. 6 picks per person across conferences.
+        {data.year} win total over/under picks. {maxPicks} picks per person across conferences.
       </div>
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
         <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: COLORS.fieldDeep }}>
               <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
-              {[1,2,3,4,5,6].map((n) => (
-                <th key={n} className="text-left px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim }}>pick {n}</th>
+              {Array.from({ length: maxPicks }, (_, n) => (
+                <th key={n} className="text-left px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim }}>pick {n + 1}</th>
               ))}
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>record</th>
             </tr>
@@ -5861,8 +5874,10 @@ function HistoryWinTotals({ data }) {
               return (
                 <tr key={m} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{m}</td>
-                  {(p.picks || []).map((pick, i) => (
-                    <td key={i} className="px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim, fontSize: "0.7rem" }}>{pick || "—"}</td>
+                  {Array.from({ length: maxPicks }, (_, i) => (
+                    <td key={i} className="px-3 py-2 whitespace-nowrap" style={{ color: COLORS.chalkDim, fontSize: "0.7rem" }}>
+                      {(p.picks || [])[i] || "—"}
+                    </td>
                   ))}
                   <td className="px-3 py-2 text-right font-semibold whitespace-nowrap" style={{ color: p.wins > p.losses ? COLORS.goldBright : COLORS.chalk }}>
                     {p.wins}-{p.losses}
