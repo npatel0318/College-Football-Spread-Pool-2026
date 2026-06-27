@@ -1706,6 +1706,9 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                 </div>
 
                 <div className="flex-1 px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+                  {g.kickoffTime && (
+                    <div className="cfb-mono text-xs mb-1.5" style={{ color: COLORS.muted }}>{g.kickoffTime}</div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     {["away", "home"].map((side) => {
                       const lbl = side === "home" ? homeL : awayL;
@@ -1935,7 +1938,10 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
               return (
                 <tr key={g.id} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
-                    {String(idx + 1).padStart(2, "0")}
+                    <div>{String(idx + 1).padStart(2, "0")}</div>
+                    {g.kickoffTime && (
+                      <div className="cfb-mono" style={{ fontSize: "0.6rem", color: COLORS.muted, lineHeight: 1.3 }}>{g.kickoffTime}</div>
+                    )}
                   </td>
                   {members.map((m) => {
                     const slug = slugify(m);
@@ -2283,8 +2289,22 @@ function CommishTab({
   );
 }
 
+function toCST(isoStr) {
+  // Convert UTC ISO string → "Sat 11:00 AM CT" label
+  if (!isoStr) return "";
+  const d = new Date(isoStr);
+  if (isNaN(d)) return "";
+  return d.toLocaleString("en-US", {
+    timeZone: "America/Chicago",
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }) + " CT";
+}
+
 function emptyGame() {
-  return { id: newId(), away: "", home: "", favorite: "home", spread: "" };
+  return { id: newId(), away: "", home: "", favorite: "home", spread: "", kickoffTime: "" };
 }
 
 function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly }) {
@@ -2513,7 +2533,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           const market = (book?.markets || []).find((m) => m.key === "spreads");
           const homeOutcome = (market?.outcomes || []).find((o) => o.name === home);
           const homePoint = homeOutcome?.point;
-          return { home, away, homePoint };
+          const kickoffTime = toCST(ev.commence_time);
+          return { home, away, homePoint, kickoffTime };
         })
         .filter((g) => g.home && g.away && g.homePoint != null)
         .map((g) => ({
@@ -2521,6 +2542,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           home: g.home,
           favorite: g.homePoint < 0 ? "home" : "away",
           spread: Math.abs(g.homePoint),
+          kickoffTime: g.kickoffTime,
           conference: "",
           awayRank: null,
           homeRank: null,
@@ -3010,6 +3032,13 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
               <div style={{ width: 84, flexShrink: 0 }}>
                 <FieldInput type="number" value={g.spread} onChange={(v) => updateGame(idx, { spread: v })} placeholder="spread" />
               </div>
+            </div>
+            <div className="mt-1.5">
+              <FieldInput
+                value={g.kickoffTime || ""}
+                onChange={(v) => updateGame(idx, { kickoffTime: v })}
+                placeholder="Kickoff (e.g. Sat 11:00 AM CT)"
+              />
             </div>
           </div>
         ))}
