@@ -479,22 +479,27 @@ export default function App() {
   const loadWeek = useCallback(async (weekNum, withPicks) => {
     if (weekNum == null) return;
     setWeekLoading(true);
-    const raw = await safeGet(`week:${weekNum}:games`, true);
-    const weekObj = raw ? JSON.parse(raw) : null;
-    setWeekCache((prev) => ({ ...prev, [weekNum]: weekObj }));
-    if (withPicks) {
-      const list = await storage.list(`week:${weekNum}:picks:`, true).catch(() => null);
-      const keys = list?.keys || [];
-      const picksObj = {};
-      for (const k of keys) {
-        const raw2 = await safeGet(k, true);
-        if (!raw2) continue;
-        const slug = k.slice(`week:${weekNum}:picks:`.length);
-        picksObj[slug] = JSON.parse(raw2);
+    try {
+      const raw = await safeGet(`week:${weekNum}:games`, true);
+      const weekObj = raw ? JSON.parse(raw) : null;
+      setWeekCache((prev) => ({ ...prev, [weekNum]: weekObj }));
+      if (withPicks) {
+        const list = await storage.list(`week:${weekNum}:picks:`, true).catch(() => null);
+        const keys = list?.keys || [];
+        const picksObj = {};
+        for (const k of keys) {
+          const raw2 = await safeGet(k, true);
+          if (!raw2) continue;
+          const slug = k.slice(`week:${weekNum}:picks:`.length);
+          picksObj[slug] = JSON.parse(raw2);
+        }
+        setPicksCache((prev) => ({ ...prev, [weekNum]: picksObj }));
       }
-      setPicksCache((prev) => ({ ...prev, [weekNum]: picksObj }));
+    } catch (e) {
+      console.error("loadWeek error", e);
+    } finally {
+      setWeekLoading(false);
     }
-    setWeekLoading(false);
   }, []);
 
   useEffect(() => {
@@ -762,22 +767,27 @@ export default function App() {
   const loadWinTotals = useCallback(async (year, withPicks) => {
     if (year == null) return;
     setWinTotalsLoading(true);
-    const raw = await safeGet(`wintotals:${year}:board`, true);
-    const board = raw ? JSON.parse(raw) : null;
-    setWinTotalsCache((prev) => ({ ...prev, [year]: board }));
-    if (withPicks) {
-      const list = await storage.list(`wintotals:${year}:picks:`, true).catch(() => null);
-      const keys = list?.keys || [];
-      const picksObj = {};
-      for (const k of keys) {
-        const raw2 = await safeGet(k, true);
-        if (!raw2) continue;
-        const slug = k.slice(`wintotals:${year}:picks:`.length);
-        picksObj[slug] = JSON.parse(raw2);
+    try {
+      const raw = await safeGet(`wintotals:${year}:board`, true);
+      const board = raw ? JSON.parse(raw) : null;
+      setWinTotalsCache((prev) => ({ ...prev, [year]: board }));
+      if (withPicks) {
+        const list = await storage.list(`wintotals:${year}:picks:`, true).catch(() => null);
+        const keys = list?.keys || [];
+        const picksObj = {};
+        for (const k of keys) {
+          const raw2 = await safeGet(k, true);
+          if (!raw2) continue;
+          const slug = k.slice(`wintotals:${year}:picks:`.length);
+          picksObj[slug] = JSON.parse(raw2);
+        }
+        setWinTotalsPicksCache((prev) => ({ ...prev, [year]: picksObj }));
       }
-      setWinTotalsPicksCache((prev) => ({ ...prev, [year]: picksObj }));
+    } catch (e) {
+      console.error("loadWinTotals error", e);
+    } finally {
+      setWinTotalsLoading(false);
     }
-    setWinTotalsLoading(false);
   }, []);
 
   useEffect(() => {
@@ -856,22 +866,27 @@ export default function App() {
   const loadPlayoff = useCallback(async (year, withPicks) => {
     if (year == null) return;
     setPlayoffLoading(true);
-    const raw = await safeGet(`playoff:${year}:board`, true);
-    const board = raw ? JSON.parse(raw) : null;
-    setPlayoffCache((prev) => ({ ...prev, [year]: board }));
-    if (withPicks) {
-      const list = await storage.list(`playoff:${year}:picks:`, true).catch(() => null);
-      const keys = list?.keys || [];
-      const picksObj = {};
-      for (const k of keys) {
-        const raw2 = await safeGet(k, true);
-        if (!raw2) continue;
-        const slug = k.slice(`playoff:${year}:picks:`.length);
-        picksObj[slug] = JSON.parse(raw2);
+    try {
+      const raw = await safeGet(`playoff:${year}:board`, true);
+      const board = raw ? JSON.parse(raw) : null;
+      setPlayoffCache((prev) => ({ ...prev, [year]: board }));
+      if (withPicks) {
+        const list = await storage.list(`playoff:${year}:picks:`, true).catch(() => null);
+        const keys = list?.keys || [];
+        const picksObj = {};
+        for (const k of keys) {
+          const raw2 = await safeGet(k, true);
+          if (!raw2) continue;
+          const slug = k.slice(`playoff:${year}:picks:`.length);
+          picksObj[slug] = JSON.parse(raw2);
+        }
+        setPlayoffPicksCache((prev) => ({ ...prev, [year]: picksObj }));
       }
-      setPlayoffPicksCache((prev) => ({ ...prev, [year]: picksObj }));
+    } catch (e) {
+      console.error("loadPlayoff error", e);
+    } finally {
+      setPlayoffLoading(false);
     }
-    setPlayoffLoading(false);
   }, []);
 
   useEffect(() => {
@@ -1001,6 +1016,7 @@ export default function App() {
   const loadStandings = useCallback(async () => {
     if (!leagueMeta) return;
     setStandingsLoading(true);
+    try {
     const blank = () => ({
       weeklyWins: 0,
       weeklyLosses: 0,
@@ -1129,6 +1145,10 @@ export default function App() {
 
     setStandings(results);
     setStandingsLoading(false);
+  } catch (e) {
+    console.error("loadStandings error", e);
+    setStandingsLoading(false);
+  }
   }, [leagueMeta, slugToName]);
 
   useEffect(() => {
@@ -1140,6 +1160,7 @@ export default function App() {
   const loadMoneyData = useCallback(async () => {
     if (!leagueMeta) return;
     setMoneyLoading(true);
+    try {
     const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
     const perMember = {};
     leagueMeta.members.forEach(
@@ -1236,6 +1257,10 @@ export default function App() {
       potRemaining,
     });
     setMoneyLoading(false);
+  } catch (e) {
+    console.error("loadMoneyData error", e);
+    setMoneyLoading(false);
+  }
   }, [leagueMeta, slugToName]);
 
   useEffect(() => {
@@ -1307,18 +1332,22 @@ export default function App() {
   /* ---------- history ---------- */
 
   const loadHistoryYear = useCallback(async (year) => {
-    if (historyData[year]) return;
     setHistoryLoading(true);
-    const raw = await safeGet(`history:${year}`, true);
-    if (raw) {
-      try {
-        setHistoryData((prev) => ({ ...prev, [year]: JSON.parse(raw) }));
-      } catch (e) {
-        setError("Couldn't parse history data — it may be corrupted.");
+    try {
+      const raw = await safeGet(`history:${year}`, true);
+      if (raw) {
+        setHistoryData((prev) => {
+          if (prev[year]) return prev; // already loaded
+          try { return { ...prev, [year]: JSON.parse(raw) }; }
+          catch { return prev; }
+        });
       }
+    } catch (e) {
+      console.error("loadHistoryYear error", e);
+    } finally {
+      setHistoryLoading(false);
     }
-    setHistoryLoading(false);
-  }, [historyData]);
+  }, []);
 
   useEffect(() => {
     if (phase === "app" && activeTab === "history") {
