@@ -2694,13 +2694,38 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   function applyImportSelection() {
     const chosen = importPreview.filter((_, i) => importSelected[i]);
     if (!chosen.length) return;
+
+    // Sort by kickoff time. Times look like "Thu 9:00 PM CT", "Sat 11:00 AM CT".
+    // Parse the day + time into a sortable number.
+    const DAY_ORDER = { thu: 0, fri: 1, sat: 2, sun: 3, mon: 4, tue: 5, wed: 6 };
+    function kickoffSortKey(t) {
+      if (!t) return 9999;
+      const lower = t.toLowerCase();
+      const dayMatch = lower.match(/^(mon|tue|wed|thu|fri|sat|sun)/);
+      const timeMatch = lower.match(/(\d+):(\d+)\s*(am|pm)/);
+      if (!dayMatch || !timeMatch) return 9999;
+      const day = DAY_ORDER[dayMatch[1]] ?? 9;
+      let hour = Number(timeMatch[1]);
+      const min = Number(timeMatch[2]);
+      const ampm = timeMatch[3];
+      if (ampm === "pm" && hour !== 12) hour += 12;
+      if (ampm === "am" && hour === 12) hour = 0;
+      return day * 10000 + hour * 100 + min;
+    }
+
+    const sorted = [...chosen].sort(
+      (a, b) => kickoffSortKey(a.kickoffTime) - kickoffSortKey(b.kickoffTime)
+    );
+
     setGames(
-      chosen.map((g) => ({
+      sorted.map((g) => ({
         id: newId(),
         away: g.away,
         home: g.home,
         favorite: g.favorite,
         spread: String(g.spread),
+        kickoffTime: g.kickoffTime || "",
+        network: g.network || "",
       }))
     );
     setImportPreview(null);
