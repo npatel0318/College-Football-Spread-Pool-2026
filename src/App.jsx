@@ -338,6 +338,8 @@ export default function App() {
   const [historyData, setHistoryData] = useState({}); // year → parsed JSON
   const [historyLoading, setHistoryLoading] = useState(false);
 
+  const [lastAutoCheckTime, setLastAutoCheckTime] = useState(null);
+
   const [commishUnlocked, setCommishUnlocked] = useState(false);
   const [passcodeInput, setPasscodeInput] = useState("");
 
@@ -664,6 +666,8 @@ export default function App() {
   async function autoGradeWeek(weekNum) {
     const week = weekCache[weekNum];
     if (!week) return { status: "error", message: "Week data not loaded." };
+    if (!week.locked) return { status: "not-locked" };
+    if (week.graded) return { status: "already-graded" };
     if (!week.weekDates?.from || !week.weekDates?.to) {
       return { status: "no-dates", message: "No game dates stored for this week. Set dates in the Games tab and re-save." };
     }
@@ -1281,6 +1285,57 @@ export default function App() {
     }
   }, [phase, activeTab, loadHistoryYear]);
 
+  /* ---------- visibility API polling ---------- */
+
+  // Refs so the event listener and timer always close over the latest state
+  // without needing to re-attach on every render.
+  const checkInProgressRef = useRef(false);
+  const lastCheckTimeRef = useRef(0);
+  const COOLDOWN_MS = 60 * 1000; // at most one ESPN call per 60 seconds
+  const TIMER_INTERVAL_MS = 3 * 60 * 1000; // fallback timer every 3 minutes
+
+  const runAutoCheckRef = useRef(null);
+  runAutoCheckRef.current = async () => {
+    if (phase !== "app" || !leagueMeta) return;
+    if (checkInProgressRef.current) return;
+    const now = Date.now();
+    if (now - lastCheckTimeRef.current < COOLDOWN_MS) return;
+
+    // Find weeks that are locked, ungraded, and already in the cache
+    const weeksToGrade = leagueMeta.weeks.filter((w) => {
+      const c = weekCache[w];
+      return c && c.locked && !c.graded;
+    });
+    if (!weeksToGrade.length) return;
+
+    checkInProgressRef.current = true;
+    lastCheckTimeRef.current = now;
+    setLastAutoCheckTime(now);
+    for (const w of weeksToGrade) {
+      await autoGradeWeek(w);
+    }
+    checkInProgressRef.current = false;
+  };
+
+  // Visibility listener — fires the moment anyone switches back to the tab/app
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === "visible") {
+        runAutoCheckRef.current?.();
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    // Also fire immediately on first load in case a graded week is waiting
+    runAutoCheckRef.current?.();
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, []); // intentionally empty — ref keeps it current without re-attaching
+
+  // Fallback interval for people who leave the tab open
+  useEffect(() => {
+    const id = setInterval(() => runAutoCheckRef.current?.(), TIMER_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
+
   async function saveHistoryData(year, data) {
     const r = await storage.set(`history:${year}`, JSON.stringify(data), true).catch(() => null);
     if (!r) {
@@ -1443,6 +1498,7 @@ export default function App() {
             slugToName={slugToName}
             toggleMyLock={toggleMyLock}
             saveUnderdogPick={saveUnderdogPick}
+            lastAutoCheckTime={lastAutoCheckTime}
           />
         )}
 
@@ -1669,7 +1725,7 @@ function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
 
 /* ------------------------------- picks tab --------------------------------- */
 
-function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock, saveUnderdogPick }) {
+function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock, saveUnderdogPick, lastAutoCheckTime }) {
   const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone"
 
   useEffect(() => {
@@ -1771,6 +1827,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
           leagueMeta={leagueMeta}
           week={week}
           picksCache={picksCache[selectedWeek] || {}}
+          lastAutoCheckTime={lastAutoCheckTime}
         />
       )}
 
@@ -2027,11 +2084,26 @@ function UnderdogOfWeekCard({ weekNum, locked, existingPick, existingResult, sav
   );
 }
 
-function WeekLiveStandings({ leagueMeta, week, picksCache }) {
+function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) {
   const members = leagueMeta.members;
   const totalGames = week.games.length;
   const gamesWithScores = week.games.filter((g) => g.homeScore != null && g.awayScore != null);
   const completedCount = gamesWithScores.length;
+
+  // Format how long ago the last check was
+  const [checkAgoLabel, setCheckAgoLabel] = useState(null);
+  useEffect(() => {
+    if (!lastAutoCheckTime) return;
+    function update() {
+      const diff = Math.floor((Date.now() - lastAutoCheckTime) / 1000);
+      if (diff < 60) setCheckAgoLabel("just now");
+      else if (diff < 3600) setCheckAgoLabel(`${Math.floor(diff / 60)}m ago`);
+      else setCheckAgoLabel(`${Math.floor(diff / 3600)}h ago`);
+    }
+    update();
+    const id = setInterval(update, 30 * 1000);
+    return () => clearInterval(id);
+  }, [lastAutoCheckTime]);
 
   const rows = members.map((name) => {
     const slug = slugify(name);
@@ -2066,8 +2138,11 @@ function WeekLiveStandings({ leagueMeta, week, picksCache }) {
         <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.chalkDim }}>
           Week {week.weekNum} standings
         </div>
-        <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
-          {completedCount} of {totalGames} games scored
+        <div className="cfb-mono text-xs flex items-center gap-1.5" style={{ color: COLORS.muted }}>
+          {completedCount} of {totalGames} scored
+          {checkAgoLabel && (
+            <span style={{ color: COLORS.muted }}>· checked {checkAgoLabel}</span>
+          )}
         </div>
       </div>
 
@@ -2127,7 +2202,7 @@ function WeekLiveStandings({ leagueMeta, week, picksCache }) {
       </div>
       {!week.graded && completedCount > 0 && (
         <div className="text-xs" style={{ color: COLORS.muted }}>
-          Live — updates as scores come in. {totalGames - completedCount} game{totalGames - completedCount === 1 ? "" : "s"} still to play.
+          Updates automatically when you open the app. {totalGames - completedCount} game{totalGames - completedCount === 1 ? "" : "s"} still to play.
         </div>
       )}
     </div>
