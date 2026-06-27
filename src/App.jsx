@@ -1383,6 +1383,7 @@ export default function App() {
   useEffect(() => {
     if (phase === "app" && activeTab === "history") {
       loadHistoryYear(2025);
+      loadHistoryYear(2024);
     }
   }, [phase, activeTab, loadHistoryYear]);
 
@@ -5443,17 +5444,20 @@ function MoneySettingsManager({
 
 function HistoryTab({ historyData, loading }) {
   const years = Object.keys(historyData).map(Number).sort((a, b) => b - a);
+  // "all-time" is a special sentinel value
   const [selectedYear, setSelectedYear] = useState(null);
-  const [view, setView] = useState("standings"); // standings | weeks | playoff | wintotals | money
+  const [view, setView] = useState("standings");
 
   useEffect(() => {
     if (years.length && selectedYear === null) setSelectedYear(years[0]);
   }, [years.length]);
 
-  const data = selectedYear ? historyData[selectedYear] : null;
+  // Reset sub-view when year changes
+  useEffect(() => { setView("standings"); }, [selectedYear]);
+
+  const data = selectedYear && selectedYear !== "all-time" ? historyData[selectedYear] : null;
 
   if (loading && !years.length) return <Spinner label="Loading history..." />;
-
   if (!years.length) {
     return (
       <EmptyState
@@ -5463,27 +5467,31 @@ function HistoryTab({ historyData, loading }) {
     );
   }
 
+  const pickerOptions = [...years, "all-time"];
+
   return (
     <div className="cfb-fade-in space-y-4">
       <div className="cfb-display text-xl uppercase">Season History</div>
 
-      {years.length > 1 && (
-        <div className="flex gap-2">
-          {years.map((y) => (
-            <button
-              key={y}
-              onClick={() => setSelectedYear(y)}
-              className="cfb-mono cfb-btn text-xs font-bold px-3 py-2"
-              style={{
-                background: selectedYear === y ? COLORS.gold : "transparent",
-                color: selectedYear === y ? COLORS.ink : COLORS.chalkDim,
-                border: `1px solid ${selectedYear === y ? COLORS.gold : COLORS.lineStrong}`,
-              }}
-            >
-              {y}
-            </button>
-          ))}
-        </div>
+      <div className="flex gap-2 flex-wrap">
+        {pickerOptions.map((y) => (
+          <button
+            key={y}
+            onClick={() => setSelectedYear(y)}
+            className="cfb-mono cfb-btn text-xs font-bold px-3 py-2"
+            style={{
+              background: selectedYear === y ? COLORS.gold : "transparent",
+              color: selectedYear === y ? COLORS.ink : COLORS.chalkDim,
+              border: `1px solid ${selectedYear === y ? COLORS.gold : COLORS.lineStrong}`,
+            }}
+          >
+            {y === "all-time" ? "All-Time" : y}
+          </button>
+        ))}
+      </div>
+
+      {selectedYear === "all-time" && (
+        <HistoryAllTime historyData={historyData} years={years} />
       )}
 
       {data && (
@@ -5519,6 +5527,95 @@ function HistoryTab({ historyData, loading }) {
           {view === "money" && <HistoryMoney data={data} />}
         </>
       )}
+    </div>
+  );
+}
+
+function HistoryAllTime({ historyData, years }) {
+  // Aggregate stats across all years per member
+  const statsMap = {};
+
+  years.forEach((year) => {
+    const d = historyData[year];
+    if (!d) return;
+
+    (d.finalStandings || []).forEach((s) => {
+      if (!statsMap[s.name]) statsMap[s.name] = { totalWins: 0, totalLosses: 0, seasons: 0, money: 0, seasonPayouts: 0 };
+      statsMap[s.name].totalWins += s.totalWins;
+      statsMap[s.name].totalLosses += s.totalLosses;
+      statsMap[s.name].seasons += 1;
+    });
+
+    Object.entries(d.finalPayments || {}).forEach(([name, amt]) => {
+      if (!statsMap[name]) statsMap[name] = { totalWins: 0, totalLosses: 0, seasons: 0, money: 0, seasonPayouts: 0 };
+      statsMap[name].money += amt;
+    });
+
+    Object.entries(d.seasonPayouts || {}).forEach(([name, amt]) => {
+      if (!statsMap[name]) statsMap[name] = { totalWins: 0, totalLosses: 0, seasons: 0, money: 0, seasonPayouts: 0 };
+      statsMap[name].seasonPayouts += amt;
+    });
+  });
+
+  const rows = Object.entries(statsMap)
+    .map(([name, s]) => ({ name, ...s, total: s.money + s.seasonPayouts }))
+    .sort((a, b) => b.totalWins - a.totalWins);
+
+  return (
+    <div className="space-y-4 cfb-fade-in">
+      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+        Combined records and money across {years.join(" + ")}. Sorted by total wins.
+      </div>
+
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>seasons</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>W-L</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>win %</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weekly+lock</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>prizes</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total $</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const winPct = r.totalWins + r.totalLosses > 0
+                ? ((r.totalWins / (r.totalWins + r.totalLosses)) * 100).toFixed(1)
+                : "—";
+              return (
+                <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className="px-3 py-2" style={{ color: i === 0 ? COLORS.gold : COLORS.muted }}>
+                    {i === 0 ? <Trophy size={14} /> : i + 1}
+                  </td>
+                  <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
+                  <td className="px-3 py-2 text-right" style={{ color: COLORS.chalkDim }}>{r.seasons}</td>
+                  <td className="px-3 py-2 text-right font-bold whitespace-nowrap" style={{ color: COLORS.chalk }}>
+                    {r.totalWins}-{r.totalLosses}
+                  </td>
+                  <td className="px-3 py-2 text-right" style={{ color: COLORS.chalkDim }}>{winPct}%</td>
+                  <td className="px-3 py-2 text-right" style={{ color: r.money > 0 ? COLORS.goldBright : r.money < 0 ? COLORS.redBright : COLORS.chalkDim }}>
+                    {fmtMoney(r.money)}
+                  </td>
+                  <td className="px-3 py-2 text-right" style={{ color: r.seasonPayouts > 0 ? COLORS.goldBright : COLORS.muted }}>
+                    {r.seasonPayouts > 0 ? fmtMoney(r.seasonPayouts) : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold" style={{ color: r.total > 0 ? COLORS.goldBright : r.total < 0 ? COLORS.redBright : COLORS.chalk }}>
+                    {fmtMoney(r.total)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="text-xs" style={{ color: COLORS.muted }}>
+        "Weekly+lock" = net from weekly winner/loser and lock picks each season, excluding buy-ins.
+        "Prizes" = season-end placement payouts (1st/2nd/3rd) only.
+      </div>
     </div>
   );
 }
@@ -5870,8 +5967,8 @@ function HistoryImportManager({ historyData, saveHistoryData }) {
     <div className="space-y-4">
       <div className="cfb-display text-lg uppercase">Import season history</div>
       <div className="text-sm" style={{ color: COLORS.chalkDim }}>
-        Upload the <span className="cfb-mono">history_2025.json</span> file Claude generated from your spreadsheet.
-        This creates a read-only archive on the History tab for all members.
+        Upload a <span className="cfb-mono">history_YYYY.json</span> file generated from a past season spreadsheet.
+        Each year is stored separately and appears in the History tab's year picker.
       </div>
 
       {existingYears.length > 0 && (
