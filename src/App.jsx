@@ -1,4 +1,4 @@
- import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { storage } from "./storage";
 import { db } from "./firebase";
 import { collection, getDocs, writeBatch } from "firebase/firestore";
@@ -1946,16 +1946,14 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                     {["away", "home"].map((side) => {
                       const lbl = side === "home" ? homeL : awayL;
                       const isPicked = myPick === side;
+                      const isOtherPicked = myPick && myPick !== side;
                       const isCorrect = week.graded && cover === side && cover !== "push";
                       const isWrong = week.graded && isPicked && cover !== side && cover !== "push";
-                      let bg = "transparent";
-                      let borderColor = COLORS.lineStrong;
-                      let textColor = COLORS.chalk;
-                      if (isPicked && !week.graded) {
-                        bg = COLORS.gold;
-                        borderColor = COLORS.gold;
-                        textColor = COLORS.ink;
-                      }
+                      const teamColor = side === "home" ? g.homeColor : g.awayColor;
+                      const teamLogo = side === "home" ? g.homeLogo : g.awayLogo;
+
+                      // Background and border logic
+                      let bg, borderColor, borderWidth = "1px";
                       if (week.graded) {
                         if (isCorrect) {
                           bg = "rgba(217,164,65,0.18)";
@@ -1963,24 +1961,67 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                         } else if (isPicked && isWrong) {
                           bg = "rgba(179,55,42,0.18)";
                           borderColor = COLORS.red;
+                        } else {
+                          bg = hexToRgba(teamColor, 0.07);
+                          borderColor = hexToRgba(teamColor, 0.25);
                         }
+                      } else if (isPicked) {
+                        bg = hexToRgba(teamColor, 0.22);
+                        borderColor = teamColor || COLORS.gold;
+                        borderWidth = "2px";
+                      } else {
+                        bg = hexToRgba(teamColor, 0.06);
+                        borderColor = hexToRgba(teamColor, 0.3);
                       }
+
                       return (
                         <button
                           key={side}
                           disabled={disabled}
                           onClick={() => savePick(selectedWeek, g.id, side)}
-                          className="cfb-btn flex flex-col items-start px-2.5 py-2 text-left"
+                          className="cfb-btn flex flex-col items-center justify-start px-2 py-3 text-center"
                           style={{
                             background: bg,
-                            border: `1px solid ${borderColor}`,
-                            color: textColor,
+                            border: `${borderWidth} solid ${borderColor}`,
                             cursor: disabled ? "default" : "pointer",
-                            opacity: disabled && !isPicked ? 0.6 : 1,
+                            opacity: isOtherPicked ? 0.4 : 1,
+                            transition: "opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease",
+                            minHeight: 90,
                           }}
                         >
-                          <span className="text-sm font-semibold leading-tight truncate w-full">{lbl.team}</span>
-                          <span className="cfb-mono text-xs mt-0.5" style={{ color: isPicked && !week.graded ? COLORS.ink : COLORS.goldBright }}>
+                          {teamLogo ? (
+                            <img
+                              src={teamLogo}
+                              alt={lbl.team}
+                              style={{
+                                width: 44,
+                                height: 44,
+                                objectFit: "contain",
+                                marginBottom: 6,
+                                opacity: isPicked || !myPick ? 1 : 0.7,
+                                filter: isOtherPicked ? "grayscale(0.5)" : "none",
+                              }}
+                              onError={(e) => { e.target.style.display = "none"; }}
+                            />
+                          ) : (
+                            <div
+                              style={{
+                                width: 44, height: 44, marginBottom: 6,
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                borderRadius: "50%",
+                                background: hexToRgba(teamColor, 0.25),
+                                fontSize: "0.7rem", fontWeight: "bold",
+                                color: teamColor || COLORS.chalk,
+                                flexShrink: 0,
+                              }}
+                            >
+                              {lbl.team.slice(0, 3).toUpperCase()}
+                            </div>
+                          )}
+                          <span className="text-xs font-semibold leading-tight w-full" style={{ color: COLORS.chalk }}>
+                            {lbl.team}
+                          </span>
+                          <span className="cfb-mono text-xs mt-0.5" style={{ color: COLORS.goldBright }}>
                             {lbl.num}
                           </span>
                         </button>
@@ -2305,7 +2346,10 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                     const slug = slugify(m);
                     const pick = picksCache[slug]?.picks?.[g.id];
                     const isLock = picksCache[slug]?.lockedGameId === g.id;
+                    const pickedSide = pick; // "home" or "away"
                     const label = pick ? (pick === "home" ? g.home : g.away) : "—";
+                    const logo = pick ? (pick === "home" ? g.homeLogo : g.awayLogo) : "";
+                    const teamColor = pick ? (pick === "home" ? g.homeColor : g.awayColor) : "";
                     let color = COLORS.chalkDim;
                     if (week.graded && pick) {
                       if (cover === "push") color = COLORS.muted;
@@ -2314,7 +2358,20 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                     return (
                       <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
                         <span className="inline-flex items-center gap-1">
-                          {label}
+                          {logo ? (
+                            <img
+                              src={logo}
+                              alt={label}
+                              style={{ width: 18, height: 18, objectFit: "contain", flexShrink: 0 }}
+                              onError={(e) => { e.target.style.display = "none"; }}
+                            />
+                          ) : pick && teamColor ? (
+                            <span style={{
+                              display: "inline-block", width: 10, height: 10, borderRadius: "50%",
+                              background: teamColor, flexShrink: 0,
+                            }} />
+                          ) : null}
+                          {label.split(" ")[0]}
                           {isLock && <Flame size={11} style={{ color: COLORS.gold, flexShrink: 0 }} />}
                         </span>
                       </td>
@@ -2675,8 +2732,9 @@ function getDatesInRange(fromDateStr, toDateStr) {
   return dates;
 }
 
-async function fetchEspnNetworks(fromDate, toDate) {
-  const map = {}; // lowercase team display name → primary network string
+async function fetchEspnGameMetadata(fromDate, toDate) {
+  const networks = {}; // lowerName -> network string
+  const teams = {};    // lowerName -> { logo, color, altColor }
   const dates = getDatesInRange(fromDate, toDate);
   for (const yyyymmdd of dates) {
     try {
@@ -2692,19 +2750,42 @@ async function fetchEspnNetworks(fromDate, toDate) {
         const networkNames = (comp.broadcasts || []).flatMap((b) => b.names || []).filter(Boolean);
         const network = networkNames[0] || "";
         for (const competitor of comp.competitors || []) {
-          const name = competitor.team?.displayName;
-          if (name) map[name.toLowerCase()] = network;
+          const team = competitor.team;
+          const name = team?.displayName;
+          if (!name) continue;
+          const key = name.toLowerCase();
+          networks[key] = network;
+          if (!teams[key]) {
+            teams[key] = {
+              logo: team.logo || "",
+              color: team.color ? `#${team.color}` : "",
+              altColor: team.alternateColor ? `#${team.alternateColor}` : "",
+            };
+          }
         }
       }
     } catch (_) {
       // Non-fatal — ESPN is unofficial and may not have all dates yet
     }
   }
-  return map;
+  return { networks, teams };
+}
+
+function hexToRgba(hex, alpha) {
+  if (!hex) return `rgba(217,164,65,${alpha})`; // fallback: app gold
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
 function emptyGame() {
-  return { id: newId(), away: "", home: "", favorite: "home", spread: "", kickoffTime: "", kickoffISO: "", network: "" };
+  return {
+    id: newId(), away: "", home: "", favorite: "home", spread: "",
+    kickoffTime: "", kickoffISO: "", network: "",
+    homeLogo: "", awayLogo: "", homeColor: "", awayColor: "",
+  };
 }
 
 function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly }) {
@@ -2941,21 +3022,31 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         })
         .filter((g) => g.home && g.away && g.homePoint != null);
 
-      // Secondary fetch: ESPN scoreboard for TV network data (best-effort, no API key needed)
-      const espnNetworks = await fetchEspnNetworks(oddsFrom, oddsTo).catch(() => ({}));
+      // Secondary fetch: ESPN scoreboard for TV network + team branding (best-effort, no API key needed)
+      const { networks: espnNetworks, teams: espnTeams } = await fetchEspnGameMetadata(oddsFrom, oddsTo).catch(() => ({ networks: {}, teams: {} }));
 
-      const withNetworks = merged.map((g) => ({
-        away: g.away,
-        home: g.home,
-        favorite: g.homePoint < 0 ? "home" : "away",
-        spread: Math.abs(g.homePoint),
-        kickoffTime: g.kickoffTime,
-        kickoffISO: g.kickoffISO,
-        network: espnNetworks[g.home.toLowerCase()] || espnNetworks[g.away.toLowerCase()] || "",
-        conference: "",
-        awayRank: null,
-        homeRank: null,
-      }));
+      const withNetworks = merged.map((g) => {
+        const homeKey = g.home.toLowerCase();
+        const awayKey = g.away.toLowerCase();
+        const homeTeam = espnTeams[homeKey] || {};
+        const awayTeam = espnTeams[awayKey] || {};
+        return {
+          away: g.away,
+          home: g.home,
+          favorite: g.homePoint < 0 ? "home" : "away",
+          spread: Math.abs(g.homePoint),
+          kickoffTime: g.kickoffTime,
+          kickoffISO: g.kickoffISO,
+          network: espnNetworks[homeKey] || espnNetworks[awayKey] || "",
+          homeLogo: homeTeam.logo || "",
+          awayLogo: awayTeam.logo || "",
+          homeColor: homeTeam.color || "",
+          awayColor: awayTeam.color || "",
+          conference: "",
+          awayRank: null,
+          homeRank: null,
+        };
+      });
 
       if (!withNetworks.length) {
         setOddsError(
@@ -3094,6 +3185,10 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         kickoffTime: g.kickoffTime || "",
         kickoffISO: g.kickoffISO || "",
         network: g.network || "",
+        homeLogo: g.homeLogo || "",
+        awayLogo: g.awayLogo || "",
+        homeColor: g.homeColor || "",
+        awayColor: g.awayColor || "",
       }))
     );
     setImportPreview(null);
