@@ -178,6 +178,47 @@ function underdogPayout(spread, settings) {
   return settings.underdogTier3Amount;
 }
 
+// Returns a Set of game IDs whose day's first kickoff has already passed.
+// Games without kickoffISO are never auto-locked here (fall back to manual lock).
+function computeAutoLockStatus(games, now = Date.now()) {
+  const dayFirstKickoff = {}; // "YYYY-MM-DD" (CT) → first kickoff timestamp (ms)
+  games.forEach((g) => {
+    if (!g.kickoffISO) return;
+    const ms = new Date(g.kickoffISO).getTime();
+    if (isNaN(ms)) return;
+    const dateKey = new Date(g.kickoffISO).toLocaleDateString("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    if (dayFirstKickoff[dateKey] == null || ms < dayFirstKickoff[dateKey]) {
+      dayFirstKickoff[dateKey] = ms;
+    }
+  });
+
+  const locked = new Set();
+  games.forEach((g) => {
+    if (!g.kickoffISO) return;
+    const dateKey = new Date(g.kickoffISO).toLocaleDateString("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    if (dayFirstKickoff[dateKey] != null && now >= dayFirstKickoff[dateKey]) {
+      locked.add(g.id);
+    }
+  });
+  return locked;
+}
+
+// Returns ms until the next upcoming kickoff (for scheduling a re-render), or null.
+function msUntilNextKickoff(games, now = Date.now()) {
+  const future = games
+    .filter((g) => g.kickoffISO)
+    .map((g) => new Date(g.kickoffISO).getTime())
+    .filter((t) => !isNaN(t) && t > now)
+    .sort((a, b) => a - b);
+  return future.length ? future[0] - now : null;
+}
+
 function fmtMoney(n) {
   const sign = n < 0 ? "-" : "";
   return `${sign}$${Math.abs(n).toFixed(2).replace(/\.00$/, "")}`;
@@ -1726,11 +1767,21 @@ function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
 /* ------------------------------- picks tab --------------------------------- */
 
 function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock, saveUnderdogPick, lastAutoCheckTime }) {
-  const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone"
+  const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone" | "standings"
+  const [autoLockTick, setAutoLockTick] = useState(0); // incremented to force re-render at kickoff
 
   useEffect(() => {
     setViewMode("mine");
   }, [selectedWeek]);
+
+  // Schedule a precise re-render the moment the next game day's first kickoff passes
+  useEffect(() => {
+    if (!week?.games) return;
+    const ms = msUntilNextKickoff(week.games);
+    if (ms == null) return;
+    const id = setTimeout(() => setAutoLockTick((t) => t + 1), ms + 1500); // +1.5s buffer
+    return () => clearTimeout(id);
+  }, [week?.games, autoLockTick]);
 
   if (selectedWeek == null) {
     return (
@@ -1756,6 +1807,11 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   const myUnderdogResult = picksCache[selectedWeek]?.[mySlug]?.underdogResult ?? null;
   const allEntries = Object.entries(picksCache[selectedWeek] || {});
   const submittedCount = allEntries.filter(([, v]) => v && Object.keys(v.picks || {}).length > 0).length;
+
+  // Per-day auto-lock: a game is pick-locked once the first game of its day has kicked off.
+  // autoLockTick causes this to recompute when a kickoff timer fires.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const autoLockedGameIds = useMemo(() => computeAutoLockStatus(week.games), [week.games, autoLockTick]);
 
   const myCorrect = week.graded
     ? week.games.reduce((acc, g) => {
@@ -1786,7 +1842,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
           {submittedCount} of {leagueMeta.members.length} have submitted picks.{" "}
           {week.showPicksEarly
             ? "The commissioner has made picks visible to everyone this week, even before lock."
-            : "Picks stay hidden from each other until the commissioner locks the week."}
+            : "Games lock automatically at the first kickoff of each day — Friday games lock Friday, Saturday games lock Saturday."}
         </div>
       )}
 
@@ -1854,7 +1910,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
             const myPick = myPicks[g.id];
             const homeL = spreadLabel(g, "home");
             const awayL = spreadLabel(g, "away");
-            const disabled = week.locked;
+            const disabled = week.locked || autoLockedGameIds.has(g.id);
             const saving = savingGameId === g.id;
 
             return (
@@ -1876,12 +1932,17 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                   </div>
                 </div>
 
-                <div className="flex-1 px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
-                  {(g.kickoffTime || g.network) && (
-                    <div className="cfb-mono text-xs mb-1.5" style={{ color: COLORS.muted }}>
+                <div className="flex-1 px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${autoLockedGameIds.has(g.id) && !week.locked ? COLORS.lineStrong : COLORS.line}` }}>
+                  <div className="cfb-mono text-xs mb-1.5 flex items-center justify-between gap-2">
+                    <span style={{ color: COLORS.muted }}>
                       {[g.kickoffTime, g.network].filter(Boolean).join(" · ")}
-                    </div>
-                  )}
+                    </span>
+                    {autoLockedGameIds.has(g.id) && !week.graded && (
+                      <span className="flex items-center gap-1 flex-shrink-0" style={{ color: COLORS.muted }}>
+                        <Lock size={10} /> picks closed
+                      </span>
+                    )}
+                  </div>
                   <div className="grid grid-cols-2 gap-2">
                     {["away", "home"].map((side) => {
                       const lbl = side === "home" ? homeL : awayL;
@@ -2644,7 +2705,7 @@ async function fetchEspnNetworks(fromDate, toDate) {
 }
 
 function emptyGame() {
-  return { id: newId(), away: "", home: "", favorite: "home", spread: "", kickoffTime: "", network: "" };
+  return { id: newId(), away: "", home: "", favorite: "home", spread: "", kickoffTime: "", kickoffISO: "", network: "" };
 }
 
 function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly }) {
@@ -2876,7 +2937,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           const homeOutcome = (market?.outcomes || []).find((o) => o.name === home);
           const homePoint = homeOutcome?.point;
           const kickoffTime = toCST(ev.commence_time);
-          return { home, away, homePoint, kickoffTime };
+          const kickoffISO = ev.commence_time || "";
+          return { home, away, homePoint, kickoffTime, kickoffISO };
         })
         .filter((g) => g.home && g.away && g.homePoint != null);
 
@@ -2889,6 +2951,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         favorite: g.homePoint < 0 ? "home" : "away",
         spread: Math.abs(g.homePoint),
         kickoffTime: g.kickoffTime,
+        kickoffISO: g.kickoffISO,
         network: espnNetworks[g.home.toLowerCase()] || espnNetworks[g.away.toLowerCase()] || "",
         conference: "",
         awayRank: null,
@@ -3030,6 +3093,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         favorite: g.favorite,
         spread: String(g.spread),
         kickoffTime: g.kickoffTime || "",
+        kickoffISO: g.kickoffISO || "",
         network: g.network || "",
       }))
     );
