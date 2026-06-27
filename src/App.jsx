@@ -1738,6 +1738,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
         {[
           { id: "mine", label: "My Picks" },
           { id: "everyone", label: "Everyone's Picks" },
+          { id: "standings", label: "This Week" },
         ].map((opt) => (
           <button
             key={opt.id}
@@ -1763,6 +1764,14 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
 
       {viewMode === "everyone" && (week.locked || week.showPicksEarly) && (
         <PicksGrid leagueMeta={leagueMeta} week={week} picksCache={picksCache[selectedWeek] || {}} slugToName={slugToName} />
+      )}
+
+      {viewMode === "standings" && (
+        <WeekLiveStandings
+          leagueMeta={leagueMeta}
+          week={week}
+          picksCache={picksCache[selectedWeek] || {}}
+        />
       )}
 
       {viewMode === "mine" && (
@@ -2012,6 +2021,113 @@ function UnderdogOfWeekCard({ weekNum, locked, existingPick, existingResult, sav
           {existingResult === true && " — hit!"}
           {existingResult === false && " — missed"}
           {existingResult == null && locked && " — pending"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WeekLiveStandings({ leagueMeta, week, picksCache }) {
+  const members = leagueMeta.members;
+  const totalGames = week.games.length;
+  const gamesWithScores = week.games.filter((g) => g.homeScore != null && g.awayScore != null);
+  const completedCount = gamesWithScores.length;
+
+  const rows = members.map((name) => {
+    const slug = slugify(name);
+    const memberPicks = picksCache[slug]?.picks || {};
+    const lockedGameId = picksCache[slug]?.lockedGameId || null;
+    let wins = 0, losses = 0, lockResult = null;
+
+    week.games.forEach((g) => {
+      const pick = memberPicks[g.id];
+      if (!pick || g.homeScore == null || g.awayScore == null) return;
+      const cover = coveringSide(g);
+      if (!cover || cover === "push") return;
+      if (pick === cover) wins++;
+      else losses++;
+      if (g.id === lockedGameId) {
+        lockResult = pick === cover ? "won" : "lost";
+      }
+    });
+
+    const pending = totalGames - wins - losses;
+    return { name, wins, losses, pending, lockResult, submitted: Object.keys(memberPicks).length > 0 };
+  }).sort((a, b) => {
+    if (b.wins !== a.wins) return b.wins - a.wins;
+    return a.losses - b.losses;
+  });
+
+  const noScoresYet = completedCount === 0;
+
+  return (
+    <div className="space-y-3 cfb-fade-in">
+      <div className="flex items-center justify-between">
+        <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.chalkDim }}>
+          Week {week.weekNum} standings
+        </div>
+        <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+          {completedCount} of {totalGames} games scored
+        </div>
+      </div>
+
+      {noScoresYet && (
+        <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+          {week.locked
+            ? "Picks are locked — standings will update here as games finish and scores come in."
+            : "Standings show up once the week is locked and games start finishing."}
+        </div>
+      )}
+
+      <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
+        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: COLORS.fieldDeep }}>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>W</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>L</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>left</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>
+                <span className="inline-flex items-center gap-1"><Flame size={11} style={{ color: COLORS.gold }} /> lock</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const isLeading = i === 0 && r.wins > 0 && (rows[0].wins > (rows[1]?.wins ?? -1));
+              return (
+                <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                  <td className="px-3 py-2" style={{ color: isLeading ? COLORS.gold : COLORS.muted }}>
+                    {isLeading ? <Trophy size={14} /> : i + 1}
+                  </td>
+                  <td className="px-3 py-2 font-semibold" style={{ color: r.submitted ? COLORS.chalk : COLORS.muted }}>
+                    {r.name}
+                    {!r.submitted && <span className="cfb-mono font-normal text-xs ml-1.5" style={{ color: COLORS.muted }}>no picks</span>}
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold" style={{ color: r.wins > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
+                    {r.wins}
+                  </td>
+                  <td className="px-3 py-2 text-right" style={{ color: r.losses > 0 ? COLORS.redBright : COLORS.chalkDim }}>
+                    {r.losses}
+                  </td>
+                  <td className="px-3 py-2 text-right" style={{ color: COLORS.muted }}>
+                    {r.pending}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {r.lockResult === "won" && <span style={{ color: COLORS.goldBright }}>+$10</span>}
+                    {r.lockResult === "lost" && <span style={{ color: COLORS.redBright }}>−$10</span>}
+                    {r.lockResult === null && <span style={{ color: COLORS.muted }}>—</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {!week.graded && completedCount > 0 && (
+        <div className="text-xs" style={{ color: COLORS.muted }}>
+          Live — updates as scores come in. {totalGames - completedCount} game{totalGames - completedCount === 1 ? "" : "s"} still to play.
         </div>
       )}
     </div>
