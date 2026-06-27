@@ -1385,6 +1385,7 @@ export default function App() {
       loadHistoryYear(2025);
       loadHistoryYear(2024);
       loadHistoryYear(2023);
+      loadHistoryYear(2022);
     }
   }, [phase, activeTab, loadHistoryYear]);
 
@@ -5850,11 +5851,16 @@ function HistoryWinTotals({ data }) {
   const picks = data.winTotalsPicks || {};
   const members = data.members || [];
   // Pick count varies by year: 2023=10, 2024/2025=6
-  const maxPicks = Math.max(...Object.values(picks).map((p) => (p.picks || []).length), 6);
+  const maxPicks = Math.max(...Object.values(picks).map((p) => (p.picks || []).length), 0);
+  const noPicksRecorded = maxPicks === 0;
+
   return (
     <div className="space-y-3">
       <div className="text-sm" style={{ color: COLORS.chalkDim }}>
-        {data.year} win total over/under picks. {maxPicks} picks per person across conferences.
+        {data.year} win total over/under picks.{" "}
+        {noPicksRecorded
+          ? "Individual picks were not recorded this year — showing W-L record only."
+          : `${maxPicks} picks per person across conferences.`}
       </div>
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
         <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
