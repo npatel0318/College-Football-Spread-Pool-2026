@@ -1706,8 +1706,10 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                 </div>
 
                 <div className="flex-1 px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
-                  {g.kickoffTime && (
-                    <div className="cfb-mono text-xs mb-1.5" style={{ color: COLORS.muted }}>{g.kickoffTime}</div>
+                  {(g.kickoffTime || g.network) && (
+                    <div className="cfb-mono text-xs mb-1.5" style={{ color: COLORS.muted }}>
+                      {[g.kickoffTime, g.network].filter(Boolean).join(" · ")}
+                    </div>
                   )}
                   <div className="grid grid-cols-2 gap-2">
                     {["away", "home"].map((side) => {
@@ -2303,8 +2305,48 @@ function toCST(isoStr) {
   }) + " CT";
 }
 
+function getDatesInRange(fromDateStr, toDateStr) {
+  const dates = [];
+  const start = new Date(fromDateStr + "T00:00:00");
+  const end = new Date(toDateStr + "T23:59:59");
+  const cur = new Date(start);
+  while (cur <= end && dates.length < 10) {
+    dates.push(cur.toISOString().slice(0, 10).replace(/-/g, ""));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return dates;
+}
+
+async function fetchEspnNetworks(fromDate, toDate) {
+  const map = {}; // lowercase team display name → primary network string
+  const dates = getDatesInRange(fromDate, toDate);
+  for (const yyyymmdd of dates) {
+    try {
+      const url =
+        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
+        `?dates=${yyyymmdd}&limit=200`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const event of data.events || []) {
+        const comp = event.competitions?.[0];
+        if (!comp) continue;
+        const networkNames = (comp.broadcasts || []).flatMap((b) => b.names || []).filter(Boolean);
+        const network = networkNames[0] || "";
+        for (const competitor of comp.competitors || []) {
+          const name = competitor.team?.displayName;
+          if (name) map[name.toLowerCase()] = network;
+        }
+      }
+    } catch (_) {
+      // Non-fatal — ESPN is unofficial and may not have all dates yet
+    }
+  }
+  return map;
+}
+
 function emptyGame() {
-  return { id: newId(), away: "", home: "", favorite: "home", spread: "", kickoffTime: "" };
+  return { id: newId(), away: "", home: "", favorite: "home", spread: "", kickoffTime: "", network: "" };
 }
 
 function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly }) {
@@ -2536,26 +2578,31 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           const kickoffTime = toCST(ev.commence_time);
           return { home, away, homePoint, kickoffTime };
         })
-        .filter((g) => g.home && g.away && g.homePoint != null)
-        .map((g) => ({
-          away: g.away,
-          home: g.home,
-          favorite: g.homePoint < 0 ? "home" : "away",
-          spread: Math.abs(g.homePoint),
-          kickoffTime: g.kickoffTime,
-          conference: "",
-          awayRank: null,
-          homeRank: null,
-        }));
+        .filter((g) => g.home && g.away && g.homePoint != null);
 
-      if (!merged.length) {
+      // Secondary fetch: ESPN scoreboard for TV network data (best-effort, no API key needed)
+      const espnNetworks = await fetchEspnNetworks(oddsFrom, oddsTo).catch(() => ({}));
+
+      const withNetworks = merged.map((g) => ({
+        away: g.away,
+        home: g.home,
+        favorite: g.homePoint < 0 ? "home" : "away",
+        spread: Math.abs(g.homePoint),
+        kickoffTime: g.kickoffTime,
+        network: espnNetworks[g.home.toLowerCase()] || espnNetworks[g.away.toLowerCase()] || "",
+        conference: "",
+        awayRank: null,
+        homeRank: null,
+      }));
+
+      if (!withNetworks.length) {
         setOddsError(
           "No games with posted spreads in that date range. Sportsbooks usually post lines a few days before kickoff — try again closer to game day, or widen the date range."
         );
       } else {
-        setImportPreview(merged);
+        setImportPreview(withNetworks);
         const sel = {};
-        merged.forEach((_, i) => (sel[i] = true));
+        withNetworks.forEach((_, i) => (sel[i] = true));
         setImportSelected(sel);
         setImportOpen(true);
         setOddsOpen(false);
@@ -2960,24 +3007,28 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           {importPreview.map((g, i) => (
             <label
               key={i}
-              className="flex items-center gap-2 px-2 py-2 text-xs cfb-mono cursor-pointer"
+              className="flex items-start gap-2 px-2 py-2 text-xs cfb-mono cursor-pointer"
               style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}
             >
               <input
                 type="checkbox"
                 checked={!!importSelected[i]}
                 onChange={() => setImportSelected((s) => ({ ...s, [i]: !s[i] }))}
-                style={{ width: 18, height: 18, flexShrink: 0 }}
+                style={{ width: 18, height: 18, flexShrink: 0, marginTop: 1 }}
               />
-              <span className="flex-1 truncate" style={{ color: COLORS.chalk }}>
-                {g.awayRank ? `#${g.awayRank} ` : ""}
-                {g.away} @ {g.homeRank ? `#${g.homeRank} ` : ""}
-                {g.home}
-              </span>
+              <div className="flex-1 min-w-0">
+                <div className="truncate" style={{ color: COLORS.chalk }}>
+                  {g.awayRank ? `#${g.awayRank} ` : ""}
+                  {g.away} @ {g.homeRank ? `#${g.homeRank} ` : ""}
+                  {g.home}
+                </div>
+                {(g.kickoffTime || g.network) && (
+                  <div style={{ color: COLORS.muted }}>{[g.kickoffTime, g.network].filter(Boolean).join(" · ")}</div>
+                )}
+              </div>
               <span style={{ color: COLORS.goldBright, flexShrink: 0 }}>
                 {g.favorite === "home" ? g.home : g.away} -{g.spread}
               </span>
-              {g.conference && <span style={{ color: COLORS.muted, flexShrink: 0 }}>{g.conference}</span>}
             </label>
           ))}
           <PrimaryButton full onClick={applyImportSelection} disabled={Object.values(importSelected).every((v) => !v)}>
@@ -3038,6 +3089,13 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                 value={g.kickoffTime || ""}
                 onChange={(v) => updateGame(idx, { kickoffTime: v })}
                 placeholder="Kickoff (e.g. Sat 11:00 AM CT)"
+              />
+            </div>
+            <div className="mt-1.5">
+              <FieldInput
+                value={g.network || ""}
+                onChange={(v) => updateGame(idx, { network: v })}
+                placeholder="Network (e.g. ABC, ESPN, FOX)"
               />
             </div>
           </div>
