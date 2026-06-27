@@ -1386,6 +1386,7 @@ export default function App() {
       loadHistoryYear(2024);
       loadHistoryYear(2023);
       loadHistoryYear(2022);
+      loadHistoryYear(2021);
     }
   }, [phase, activeTab, loadHistoryYear]);
 
@@ -5853,6 +5854,16 @@ function HistoryWinTotals({ data }) {
   // Pick count varies by year: 2023=10, 2024/2025=6
   const maxPicks = Math.max(...Object.values(picks).map((p) => (p.picks || []).length), 0);
   const noPicksRecorded = maxPicks === 0;
+  const hasAnyRecords = Object.values(picks).some((p) => p && (p.wins > 0 || p.losses > 0));
+
+  if (!hasAnyRecords && Object.keys(picks).length === 0) {
+    return (
+      <EmptyState
+        title="No win total picks"
+        body={`${data.year} didn't include a win total O/U contest.`}
+      />
+    );
+  }
 
   return (
     <div className="space-y-3">
