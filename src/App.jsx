@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { storage } from "./storage";
 import { db } from "./firebase";
 import { collection, getDocs, writeBatch } from "firebase/firestore";
@@ -1774,12 +1774,13 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
     setViewMode("mine");
   }, [selectedWeek]);
 
-  // Schedule a precise re-render the moment the next game day's first kickoff passes
+  // Timer that fires precisely when the next game day's first kickoff passes,
+  // incrementing autoLockTick so autoLockedGameIds recomputes.
   useEffect(() => {
-    if (!week?.games) return;
+    if (!week?.games?.length) return;
     const ms = msUntilNextKickoff(week.games);
     if (ms == null) return;
-    const id = setTimeout(() => setAutoLockTick((t) => t + 1), ms + 1500); // +1.5s buffer
+    const id = setTimeout(() => setAutoLockTick((t) => t + 1), ms + 1500);
     return () => clearTimeout(id);
   }, [week?.games, autoLockTick]);
 
@@ -1808,10 +1809,8 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   const allEntries = Object.entries(picksCache[selectedWeek] || {});
   const submittedCount = allEntries.filter(([, v]) => v && Object.keys(v.picks || {}).length > 0).length;
 
-  // Per-day auto-lock: a game is pick-locked once the first game of its day has kicked off.
-  // autoLockTick causes this to recompute when a kickoff timer fires.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const autoLockedGameIds = useMemo(() => computeAutoLockStatus(week.games), [week.games, autoLockTick]);
+  // Plain computation — safe after the early-return guards above.
+  const autoLockedGameIds = computeAutoLockStatus(week.games);
 
   const myCorrect = week.graded
     ? week.games.reduce((acc, g) => {
