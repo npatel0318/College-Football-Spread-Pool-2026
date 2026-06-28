@@ -3101,9 +3101,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         );
       } else {
         setImportPreview(merged);
-        const sel = {};
-        merged.forEach((_, i) => (sel[i] = true));
-        setImportSelected(sel);
+        setImportSelected({});
         setImportOpen(true);
         setCfbdOpen(false);
       }
@@ -3197,9 +3195,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         setWeekDatesFrom(oddsFrom);
         setWeekDatesTo(oddsTo);
         setImportPreview(withNetworks);
-        const sel = {};
-        withNetworks.forEach((_, i) => (sel[i] = true));
-        setImportSelected(sel);
+        setImportSelected({});
         setImportOpen(true);
         setOddsOpen(false);
       }
@@ -3294,9 +3290,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         };
       });
       setImportPreview(cleaned);
-      const sel = {};
-      cleaned.forEach((_, i) => (sel[i] = true));
-      setImportSelected(sel);
+      setImportSelected({});
     } catch (e) {
       setImportError(e.message);
     }
@@ -3674,19 +3668,40 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
       </div>
 
       {importPreview && (() => {
-        // Group games into sections: Top 25 first, then conferences, then Other
         const CONF_ORDER = ["SEC","Big Ten","Big 12","ACC","Mountain West","Sun Belt","American","MAC","C-USA","Independents"];
         const indexed = importPreview.map((g, i) => ({ ...g, _idx: i }));
-        const ranked = indexed
+        const totalGames = indexed.length;
+        const totalSelected = Object.values(importSelected).filter(Boolean).length;
+
+        // Top 25 section: any game with at least one ranked team, best matchup first
+        const top25 = indexed
           .filter((g) => g.awayRank || g.homeRank)
-          .sort((a, b) => Math.min(a.awayRank || 99, a.homeRank || 99) - Math.min(b.awayRank || 99, b.homeRank || 99));
-        const unranked = indexed.filter((g) => !g.awayRank && !g.homeRank);
+          .sort((a, b) =>
+            Math.min(a.awayRank || 99, a.homeRank || 99) -
+            Math.min(b.awayRank || 99, b.homeRank || 99)
+          );
+
+        // Conference sections: each game goes into EVERY conference its teams belong to
         const confBuckets = {};
-        unranked.forEach((g) => {
-          const key = g.conference || "Other";
-          if (!confBuckets[key]) confBuckets[key] = [];
-          confBuckets[key].push(g);
+        indexed.forEach((g) => {
+          const confs = new Set();
+          if (g.homeConf) confs.add(g.homeConf);
+          if (g.awayConf) confs.add(g.awayConf);
+          if (confs.size === 0) confs.add("Other");
+          confs.forEach((conf) => {
+            if (!confBuckets[conf]) confBuckets[conf] = [];
+            confBuckets[conf].push(g);
+          });
         });
+
+        // Sort each conference bucket: ranked games first, then by best rank
+        Object.values(confBuckets).forEach((games) =>
+          games.sort((a, b) =>
+            Math.min(a.awayRank || 99, a.homeRank || 99) -
+            Math.min(b.awayRank || 99, b.homeRank || 99)
+          )
+        );
+
         const confSorted = Object.keys(confBuckets).sort((a, b) => {
           const ai = CONF_ORDER.indexOf(a), bi = CONF_ORDER.indexOf(b);
           if (ai !== -1 && bi !== -1) return ai - bi;
@@ -3696,51 +3711,103 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           if (b === "Other") return -1;
           return a.localeCompare(b);
         });
+
         const sections = [
-          ...(ranked.length ? [{ label: "Top 25", games: ranked }] : []),
+          ...(top25.length ? [{ label: "Top 25", games: top25 }] : []),
           ...confSorted.map((c) => ({ label: c, games: confBuckets[c] })),
         ];
-        const totalSelected = Object.values(importSelected).filter(Boolean).length;
+
+        function SectionGameRow({ g }) {
+          const checked = !!importSelected[g._idx];
+          return (
+            <label
+              className="flex items-start gap-2 px-2 py-2 text-xs cfb-mono cursor-pointer"
+              style={{
+                background: checked ? "rgba(217,164,65,0.1)" : COLORS.fieldDeep,
+                border: `1px solid ${checked ? COLORS.lineStrong : COLORS.line}`,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => setImportSelected((s) => ({ ...s, [g._idx]: !s[g._idx] }))}
+                style={{ width: 18, height: 18, flexShrink: 0, marginTop: 1 }}
+              />
+              <div className="flex-1 min-w-0">
+                <div className="truncate" style={{ color: COLORS.chalk }}>
+                  {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : ""}
+                  {g.away}
+                  {" @ "}
+                  {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : ""}
+                  {g.home}
+                </div>
+                <div style={{ color: COLORS.muted }}>
+                  {[g.kickoffTime, g.network].filter(Boolean).join(" · ")}
+                  {g.homeConf && g.awayConf && g.homeConf !== g.awayConf && (
+                    <span className="ml-1">· {g.awayConf} @ {g.homeConf}</span>
+                  )}
+                </div>
+              </div>
+              <span style={{ color: COLORS.goldBright, flexShrink: 0 }}>
+                {g.favorite === "home" ? g.home : g.away} -{g.spread}
+              </span>
+            </label>
+          );
+        }
 
         return (
           <div className="px-3 py-3 space-y-3" style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.06)" }}>
+
+            {/* Counter + global controls */}
             <div className="flex items-center justify-between">
-              <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.goldBright }}>
-                Pick which games to use
+              <div className="flex items-center gap-2">
+                <div
+                  className="cfb-mono text-lg font-bold leading-none"
+                  style={{ color: totalSelected > 0 ? COLORS.goldBright : COLORS.chalkDim }}
+                >
+                  {totalSelected}
+                </div>
+                <div className="cfb-mono text-xs" style={{ color: COLORS.chalkDim }}>
+                  / {totalGames}<br />selected
+                </div>
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }}
+                  onClick={() => {
+                    const s = {};
+                    importPreview.forEach((_, i) => (s[i] = true));
+                    setImportSelected(s);
+                  }}
                   className="cfb-mono text-xs px-2 py-1"
-                  style={{ color: COLORS.goldBright, border: `1px solid ${COLORS.lineStrong}` }}
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}
                 >
-                  all
+                  select all
                 </button>
                 <button
                   onClick={() => setImportSelected({})}
                   className="cfb-mono text-xs px-2 py-1"
-                  style={{ color: COLORS.muted, border: `1px solid ${COLORS.lineStrong}` }}
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
                 >
-                  none
+                  clear all
                 </button>
               </div>
             </div>
 
             {sections.map((section) => {
               const sectionIdxs = section.games.map((g) => g._idx);
-              const allOn = sectionIdxs.every((i) => importSelected[i]);
-              const anyOn = sectionIdxs.some((i) => importSelected[i]);
+              const selectedInSection = sectionIdxs.filter((i) => importSelected[i]).length;
+              const allOn = selectedInSection === sectionIdxs.length;
+              const anyOn = selectedInSection > 0;
               return (
                 <div key={section.label}>
-                  {/* Section header */}
                   <div
                     className="flex items-center justify-between px-2 py-1.5 mb-1"
                     style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
                   >
                     <span className="cfb-mono text-xs font-bold uppercase tracking-wider" style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
-                      {section.label === "Top 25" ? "🏆 Top 25 matchups" : section.label}
+                      {section.label === "Top 25" ? "🏆 Top 25" : section.label}
                       <span className="ml-2 font-normal" style={{ color: COLORS.muted }}>
-                        {sectionIdxs.filter((i) => importSelected[i]).length}/{section.games.length}
+                        {selectedInSection}/{section.games.length}
                       </span>
                     </span>
                     <button
@@ -3750,50 +3817,13 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                         setImportSelected((s) => ({ ...s, ...patch }));
                       }}
                       className="cfb-mono text-xs px-2 py-0.5"
-                      style={{ color: allOn ? COLORS.muted : COLORS.goldBright, border: `1px solid ${COLORS.lineStrong}` }}
+                      style={{ border: `1px solid ${COLORS.lineStrong}`, color: allOn ? COLORS.muted : COLORS.goldBright }}
                     >
                       {allOn ? "deselect all" : anyOn ? "select rest" : "select all"}
                     </button>
                   </div>
-
-                  {/* Games in this section */}
                   <div className="space-y-1">
-                    {section.games.map((g) => (
-                      <label
-                        key={g._idx}
-                        className="flex items-start gap-2 px-2 py-2 text-xs cfb-mono cursor-pointer"
-                        style={{
-                          background: importSelected[g._idx] ? "rgba(217,164,65,0.08)" : COLORS.fieldDeep,
-                          border: `1px solid ${importSelected[g._idx] ? COLORS.lineStrong : COLORS.line}`,
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={!!importSelected[g._idx]}
-                          onChange={() => setImportSelected((s) => ({ ...s, [g._idx]: !s[g._idx] }))}
-                          style={{ width: 18, height: 18, flexShrink: 0, marginTop: 1 }}
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="truncate" style={{ color: COLORS.chalk }}>
-                            {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : ""}
-                            {g.away}
-                            {" @ "}
-                            {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : ""}
-                            {g.home}
-                          </div>
-                          {(g.kickoffTime || g.network) && (
-                            <div style={{ color: COLORS.muted }}>{[g.kickoffTime, g.network].filter(Boolean).join(" · ")}</div>
-                          )}
-                          {/* Cross-conference label */}
-                          {g.homeConf && g.awayConf && g.homeConf !== g.awayConf && (
-                            <div style={{ color: COLORS.muted }}>{g.awayConf} @ {g.homeConf}</div>
-                          )}
-                        </div>
-                        <span style={{ color: COLORS.goldBright, flexShrink: 0 }}>
-                          {g.favorite === "home" ? g.home : g.away} -{g.spread}
-                        </span>
-                      </label>
-                    ))}
+                    {section.games.map((g) => <SectionGameRow key={g._idx} g={g} />)}
                   </div>
                 </div>
               );
