@@ -2129,7 +2129,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       );
                     })}
                   </div>
-                  {myPick && !gameLocked && !week.graded && (
+                  {myPick && !disabled && !week.graded && (
                     <div className="mt-1.5 text-center">
                       <span className="cfb-mono" style={{ fontSize: "0.65rem", color: COLORS.muted }}>
                         tap your pick again to clear
