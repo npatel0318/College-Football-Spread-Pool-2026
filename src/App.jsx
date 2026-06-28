@@ -543,8 +543,21 @@ export default function App() {
     setSavingGameId(gameId);
     const mySlug = slugify(myName);
     const existing = picksCache[weekNum]?.[mySlug] || {};
-    const updatedPicks = { ...(existing.picks || {}), [gameId]: side };
-    const payload = { name: myName, picks: updatedPicks, lockedGameId: existing.lockedGameId || null, submittedAt: Date.now() };
+    const currentPick = (existing.picks || {})[gameId];
+
+    // Toggle: clicking the already-selected side unselects it
+    const updatedPicks = { ...(existing.picks || {}) };
+    if (currentPick === side) {
+      delete updatedPicks[gameId];
+    } else {
+      updatedPicks[gameId] = side;
+    }
+
+    // If we just cleared the locked game, clear the lock too
+    const newLockedGameId =
+      currentPick === side && existing.lockedGameId === gameId ? null : existing.lockedGameId;
+
+    const payload = { name: myName, picks: updatedPicks, lockedGameId: newLockedGameId, submittedAt: Date.now() };
     const r = await storage
       .set(`week:${weekNum}:picks:${mySlug}`, JSON.stringify(payload), true)
       .catch(() => null);
@@ -650,6 +663,28 @@ export default function App() {
       setLeagueMeta(updatedMeta);
     }
     return true;
+  }
+
+  async function deleteWeek(weekNum) {
+    // Delete games doc
+    await storage.delete(`week:${weekNum}:games`, true).catch(() => null);
+    // Delete every pick for this week
+    const pickKeys = await safeList(`week:${weekNum}:picks:`, true);
+    for (const key of pickKeys) {
+      await storage.delete(key, true).catch(() => null);
+    }
+    // Remove from leagueMeta
+    const updatedMeta = { ...leagueMeta, weeks: leagueMeta.weeks.filter((w) => w !== weekNum) };
+    await storage.set("league-meta", JSON.stringify(updatedMeta), true).catch(() => null);
+    setLeagueMeta(updatedMeta);
+    setWeekCache((prev) => { const n = { ...prev }; delete n[weekNum]; return n; });
+    setPicksCache((prev) => { const n = { ...prev }; delete n[weekNum]; return n; });
+  }
+
+  async function deleteMember(name) {
+    const updated = { ...leagueMeta, members: leagueMeta.members.filter((m) => m !== name) };
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (r) setLeagueMeta(updated);
   }
 
   async function toggleLock(weekNum) {
@@ -1703,6 +1738,8 @@ export default function App() {
             historyData={historyData}
             saveHistoryData={saveHistoryData}
             resetAllData={resetAllData}
+            deleteWeek={deleteWeek}
+            deleteMember={deleteMember}
           />
         )}
       </div>
@@ -2092,8 +2129,14 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       );
                     })}
                   </div>
+                  {myPick && !gameLocked && !week.graded && (
+                    <div className="mt-1.5 text-center">
+                      <span className="cfb-mono" style={{ fontSize: "0.65rem", color: COLORS.muted }}>
+                        tap your pick again to clear
+                      </span>
+                    </div>
+                  )}
                   {myPick && (() => {
-                    const isMyLock = myLockedGameId === g.id;
                     const lockGraded = week.graded && isMyLock;
                     const lockWon = lockGraded && cover !== "push" && myPick === cover;
                     const lockLost = lockGraded && cover !== "push" && myPick !== cover;
@@ -2576,6 +2619,8 @@ function CommishTab({
   historyData,
   saveHistoryData,
   resetAllData,
+  deleteWeek,
+  deleteMember,
 }) {
   const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults | money
   const [editingWeek, setEditingWeek] = useState(null);
@@ -2632,6 +2677,9 @@ function CommishTab({
         <SecondaryButton onClick={() => setMode("history")} disabled={mode === "history"}>
           Import history
         </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("members")} disabled={mode === "members"}>
+          Members
+        </SecondaryButton>
       </div>
 
       <div className="text-sm flex items-center gap-1.5" style={{ color: COLORS.chalkDim }}>
@@ -2646,6 +2694,7 @@ function CommishTab({
           saveWeekGames={saveWeekGames}
           toggleLock={toggleLock}
           toggleShowPicksEarly={toggleShowPicksEarly}
+          deleteWeek={deleteWeek}
         />
       )}
 
@@ -2714,6 +2763,10 @@ function CommishTab({
 
       {mode === "history" && (
         <HistoryImportManager historyData={historyData} saveHistoryData={saveHistoryData} />
+      )}
+
+      {mode === "members" && (
+        <MembersManager leagueMeta={leagueMeta} deleteMember={deleteMember} />
       )}
 
       <div className="mt-6 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
@@ -2852,7 +2905,7 @@ function emptyGame() {
   };
 }
 
-function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly }) {
+function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly, deleteWeek }) {
   const nextWeekNum = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) + 1 : 1;
   const [selectedWeek, setSelectedWeek] = useState(null); // null = new week
   const [games, setGames] = useState(Array.from({ length: 10 }, emptyGame));
@@ -2864,6 +2917,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const [importError, setImportError] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
   const [importSelected, setImportSelected] = useState({});
+  const [confirmDeleteWeek, setConfirmDeleteWeek] = useState(null); // week num pending delete
 
   const [cfbdOpen, setCfbdOpen] = useState(false);
   const [cfbdKeyInput, setCfbdKeyInput] = useState("");
@@ -3289,9 +3343,42 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           .slice()
           .sort((a, b) => b - a)
           .map((w) => (
-            <SecondaryButton key={w} onClick={() => startEdit(w)} disabled={selectedWeek === w}>
-              edit wk {w}
-            </SecondaryButton>
+            <div key={w} className="flex items-center gap-1">
+              <SecondaryButton onClick={() => startEdit(w)} disabled={selectedWeek === w}>
+                edit wk {w}
+              </SecondaryButton>
+              {confirmDeleteWeek === w ? (
+                <>
+                  <button
+                    onClick={async () => {
+                      setConfirmDeleteWeek(null);
+                      if (selectedWeek === w) { setSelectedWeek(null); setLoadedExisting(false); }
+                      await deleteWeek(w);
+                    }}
+                    className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2"
+                    style={{ background: "rgba(179,55,42,0.22)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}
+                  >
+                    confirm delete
+                  </button>
+                  <button
+                    onClick={() => setConfirmDeleteWeek(null)}
+                    className="cfb-mono cfb-btn text-xs px-2.5 py-2"
+                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}
+                  >
+                    cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setConfirmDeleteWeek(w)}
+                  className="cfb-mono cfb-btn text-xs px-2 py-2"
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
+                  title={`Delete week ${w}`}
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
+            </div>
           ))}
       </div>
 
@@ -5961,6 +6048,63 @@ function HistoryMoney({ data }) {
       </div>
       <div className="text-xs" style={{ color: COLORS.muted }}>
         "Weekly + locks" = net from weekly winner/loser and lock results across the season, before the season-end placement payout.
+      </div>
+    </div>
+  );
+}
+
+function MembersManager({ leagueMeta, deleteMember }) {
+  const [confirmDelete, setConfirmDelete] = useState(null); // member name pending delete
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <div className="space-y-4 cfb-fade-in">
+      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+        Remove a member who isn't participating this season. Their picks stay stored in case you need them later.
+      </div>
+      <div className="space-y-2">
+        {leagueMeta.members.map((m) => (
+          <div
+            key={m}
+            className="flex items-center justify-between px-3 py-2.5"
+            style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldMid }}
+          >
+            <span className="text-sm font-semibold" style={{ color: COLORS.chalk }}>{m}</span>
+            {confirmDelete === m ? (
+              <div className="flex items-center gap-2">
+                <span className="cfb-mono text-xs" style={{ color: COLORS.redBright }}>Remove {m.split(" ")[0]}?</span>
+                <button
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    await deleteMember(m);
+                    setConfirmDelete(null);
+                    setBusy(false);
+                  }}
+                  className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-1.5"
+                  style={{ background: "rgba(179,55,42,0.22)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}
+                >
+                  {busy ? "…" : "yes, remove"}
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(null)}
+                  className="cfb-mono cfb-btn text-xs px-2.5 py-1.5"
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}
+                >
+                  cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmDelete(m)}
+                className="cfb-mono cfb-btn text-xs px-2.5 py-1.5 flex items-center gap-1.5"
+                style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
+              >
+                <Trash2 size={12} /> remove
+              </button>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
