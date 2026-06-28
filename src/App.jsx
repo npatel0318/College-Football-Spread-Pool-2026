@@ -2314,6 +2314,13 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
     return () => clearInterval(id);
   }, [lastAutoCheckTime]);
 
+  // Push games are decided (scores are in) but count as neither win nor loss.
+  // Compute once at the game level so all members share the same push count.
+  const pushGameCount = week.games.filter((g) => {
+    if (g.homeScore == null || g.awayScore == null) return false;
+    return coveringSide(g) === "push";
+  }).length;
+
   const rows = members.map((name) => {
     const slug = slugify(name);
     const memberPicks = picksCache[slug]?.picks || {};
@@ -2328,11 +2335,12 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
       if (pick === cover) wins++;
       else losses++;
       if (g.id === lockedGameId) {
-        lockResult = pick === cover ? "won" : "lost";
-      }
+          if (cover === "push") lockResult = "push";
+          else lockResult = pick === cover ? "won" : "lost";
+        }
     });
 
-    const pending = totalGames - wins - losses;
+    const pending = totalGames - wins - losses - pushGameCount;
     return { name, wins, losses, pending, lockResult, submitted: Object.keys(memberPicks).length > 0 };
   }).sort((a, b) => {
     if (b.wins !== a.wins) return b.wins - a.wins;
@@ -2401,6 +2409,7 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
                   <td className="px-3 py-2 text-right">
                     {r.lockResult === "won" && <span style={{ color: COLORS.goldBright }}>+$10</span>}
                     {r.lockResult === "lost" && <span style={{ color: COLORS.redBright }}>−$10</span>}
+                    {r.lockResult === "push" && <span style={{ color: COLORS.muted }}>push</span>}
                     {r.lockResult === null && <span style={{ color: COLORS.muted }}>—</span>}
                   </td>
                 </tr>
@@ -3219,7 +3228,20 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   }
 
   function updateGame(idx, patch) {
-    setGames((prev) => prev.map((g, i) => (i === idx ? { ...g, ...patch } : g)));
+    setGames((prev) => prev.map((g, i) => {
+      if (i !== idx) return g;
+      const updated = { ...g, ...patch };
+      // If team name changed, clear the stale logo/color from the previous Odds API import
+      if ("away" in patch && patch.away !== g.away) {
+        updated.awayLogo = null;
+        updated.awayColor = null;
+      }
+      if ("home" in patch && patch.home !== g.home) {
+        updated.homeLogo = null;
+        updated.homeColor = null;
+      }
+      return updated;
+    }));
   }
 
   function addRow() {
