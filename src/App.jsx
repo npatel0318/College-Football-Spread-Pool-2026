@@ -2137,6 +2137,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                     </div>
                   )}
                   {myPick && (() => {
+                    const isMyLock = myLockedGameId === g.id;
                     const lockGraded = week.graded && isMyLock;
                     const lockWon = lockGraded && cover !== "push" && myPick === cover;
                     const lockLost = lockGraded && cover !== "push" && myPick !== cover;
