@@ -838,15 +838,15 @@ export default function App() {
       const board = raw ? JSON.parse(raw) : null;
       setWinTotalsCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
-        const list = await safeList(`wintotals:${year}:picks:`, true);
-        const keys = list;
+        const keys = await safeList(`wintotals:${year}:picks:`, true);
+        const results = await Promise.all(keys.map((k) => safeGet(k, true)));
         const picksObj = {};
-        for (const k of keys) {
-          const raw2 = await safeGet(k, true);
-          if (!raw2) continue;
+        keys.forEach((k, i) => {
+          const raw2 = results[i];
+          if (!raw2) return;
           const slug = k.slice(`wintotals:${year}:picks:`.length);
-          picksObj[slug] = JSON.parse(raw2);
-        }
+          try { picksObj[slug] = JSON.parse(raw2); } catch {}
+        });
         setWinTotalsPicksCache((prev) => ({ ...prev, [year]: picksObj }));
       }
     } catch (e) {
@@ -937,15 +937,15 @@ export default function App() {
       const board = raw ? JSON.parse(raw) : null;
       setPlayoffCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
-        const list = await safeList(`playoff:${year}:picks:`, true);
-        const keys = list;
+        const keys = await safeList(`playoff:${year}:picks:`, true);
+        const results = await Promise.all(keys.map((k) => safeGet(k, true)));
         const picksObj = {};
-        for (const k of keys) {
-          const raw2 = await safeGet(k, true);
-          if (!raw2) continue;
+        keys.forEach((k, i) => {
+          const raw2 = results[i];
+          if (!raw2) return;
           const slug = k.slice(`playoff:${year}:picks:`.length);
-          picksObj[slug] = JSON.parse(raw2);
-        }
+          try { picksObj[slug] = JSON.parse(raw2); } catch {}
+        });
         setPlayoffPicksCache((prev) => ({ ...prev, [year]: picksObj }));
       }
     } catch (e) {
@@ -1475,6 +1475,32 @@ export default function App() {
     const id = setInterval(() => runAutoCheckRef.current?.(), TIMER_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);
+
+  // Win Totals / Playoff: mobile Safari suspends background tabs, so cached state can
+  // go stale silently. Refetch whenever the app becomes visible again while one of
+  // these tabs is open, same fix already applied to the Picks tab's auto-grading.
+  const reloadActiveTabRef = useRef(null);
+  reloadActiveTabRef.current = () => {
+    if (phase !== "app") return;
+    if (activeTab === "wintotals" && selectedWinTotalsYear != null) {
+      loadWinTotals(selectedWinTotalsYear, true);
+    } else if (activeTab === "playoff" && selectedPlayoffYear != null) {
+      loadPlayoff(selectedPlayoffYear, true);
+    }
+  };
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === "visible") {
+        reloadActiveTabRef.current?.();
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    window.addEventListener("focus", handler);
+    return () => {
+      document.removeEventListener("visibilitychange", handler);
+      window.removeEventListener("focus", handler);
+    };
+  }, []); // intentionally empty — ref keeps it current without re-attaching
 
   async function saveHistoryData(year, data) {
     const r = await storage.set(`history:${year}`, JSON.stringify(data), true).catch(() => null);
