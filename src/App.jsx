@@ -308,6 +308,59 @@ function Spinner({ label }) {
   );
 }
 
+// Same idea as Spinner, but for spots where loads have been unreliable on mobile
+// Safari (Win Totals / Playoff). Shows which network call is in flight and how
+// long it's been running, offers a cheap in-app retry first (re-runs the fetch
+// without losing app state), and only falls back to a full page reload as a
+// last resort. The stage/elapsed readout also means if it DOES hang again, you
+// can read off exactly what's stuck and report it back instead of guessing.
+function DiagnosticSpinner({ label, stage, onRetry }) {
+  const [elapsed, setElapsed] = useState(0);
+  const [retrying, setRetrying] = useState(false);
+  useEffect(() => {
+    const start = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const stageLabel = { board: "fetching board", picks: "fetching picks", done: "wrapping up" }[stage] || stage;
+  return (
+    <div className="flex flex-col items-start gap-3">
+      <div className="flex items-center gap-2" style={{ color: COLORS.chalkDim }}>
+        <RefreshCw size={14} className="animate-spin" />
+        <span className="text-sm cfb-mono">{label || "Loading..."}</span>
+      </div>
+      {elapsed >= 3 && (
+        <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+          {stageLabel ? `${stageLabel} — ` : ""}{elapsed}s elapsed
+        </div>
+      )}
+      {elapsed >= 6 && (
+        <div className="flex gap-2">
+          <button
+            onClick={async () => {
+              setRetrying(true);
+              await onRetry?.();
+              setRetrying(false);
+            }}
+            disabled={retrying}
+            className="cfb-mono text-xs px-3 py-2 cfb-btn"
+            style={{ border: `1px solid ${COLORS.gold}`, color: COLORS.goldBright }}
+          >
+            {retrying ? "Retrying..." : "Stuck? Tap to retry"}
+          </button>
+          <button
+            onClick={() => window.location.reload()}
+            className="cfb-mono text-xs px-3 py-2 cfb-btn"
+            style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalk }}
+          >
+            Still stuck? Full reload
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Banner({ kind = "error", children, onDismiss }) {
   const bg = kind === "error" ? "rgba(179,55,42,0.16)" : "rgba(217,164,65,0.16)";
   const border = kind === "error" ? COLORS.red : COLORS.gold;
@@ -411,11 +464,13 @@ export default function App() {
   const [winTotalsCache, setWinTotalsCache] = useState({}); // year -> {year, teams, locked}
   const [winTotalsPicksCache, setWinTotalsPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
   const [winTotalsLoading, setWinTotalsLoading] = useState(false);
+  const [winTotalsLoadStage, setWinTotalsLoadStage] = useState(null); // diagnostic: which await is in flight
 
   const [selectedPlayoffYear, setSelectedPlayoffYear] = useState(null);
   const [playoffCache, setPlayoffCache] = useState({}); // year -> {year, teams, locked}
   const [playoffPicksCache, setPlayoffPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
   const [playoffLoading, setPlayoffLoading] = useState(false);
+  const [playoffLoadStage, setPlayoffLoadStage] = useState(null); // diagnostic: which await is in flight
 
   const [moneyData, setMoneyData] = useState(null);
   const [moneyLoading, setMoneyLoading] = useState(false);
@@ -844,11 +899,13 @@ export default function App() {
   const loadWinTotals = useCallback(async (year, withPicks) => {
     if (year == null) return;
     setWinTotalsLoading(true);
+    setWinTotalsLoadStage("board");
     try {
       const raw = await safeGet(`wintotals:${year}:board`, true);
       const board = raw ? JSON.parse(raw) : null;
       setWinTotalsCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
+        setWinTotalsLoadStage("picks");
         const entries = await safeListValues(`wintotals:${year}:picks:`, true);
         const picksObj = {};
         entries.forEach(({ key: k, value: raw2 }) => {
@@ -858,8 +915,10 @@ export default function App() {
         });
         setWinTotalsPicksCache((prev) => ({ ...prev, [year]: picksObj }));
       }
+      setWinTotalsLoadStage("done");
     } catch (e) {
       console.error("loadWinTotals error", e);
+      setWinTotalsLoadStage("error: " + (e?.message || "unknown"));
     } finally {
       setWinTotalsLoading(false);
     }
@@ -941,11 +1000,13 @@ export default function App() {
   const loadPlayoff = useCallback(async (year, withPicks) => {
     if (year == null) return;
     setPlayoffLoading(true);
+    setPlayoffLoadStage("board");
     try {
       const raw = await safeGet(`playoff:${year}:board`, true);
       const board = raw ? JSON.parse(raw) : null;
       setPlayoffCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
+        setPlayoffLoadStage("picks");
         const entries = await safeListValues(`playoff:${year}:picks:`, true);
         const picksObj = {};
         entries.forEach(({ key: k, value: raw2 }) => {
@@ -955,8 +1016,10 @@ export default function App() {
         });
         setPlayoffPicksCache((prev) => ({ ...prev, [year]: picksObj }));
       }
+      setPlayoffLoadStage("done");
     } catch (e) {
       console.error("loadPlayoff error", e);
+      setPlayoffLoadStage("error: " + (e?.message || "unknown"));
     } finally {
       setPlayoffLoading(false);
     }
@@ -1683,6 +1746,8 @@ export default function App() {
             setSelectedYear={setSelectedWinTotalsYear}
             board={selectedWinTotalsYear != null ? winTotalsCache[selectedWinTotalsYear] : null}
             loading={winTotalsLoading}
+            loadStage={winTotalsLoadStage}
+            onRetry={() => loadWinTotals(selectedWinTotalsYear, true)}
             picksCache={winTotalsPicksCache}
             myName={myName}
             saveWinTotalsPicks={saveWinTotalsPicks}
@@ -1697,6 +1762,8 @@ export default function App() {
             setSelectedYear={setSelectedPlayoffYear}
             board={selectedPlayoffYear != null ? playoffCache[selectedPlayoffYear] : null}
             loading={playoffLoading}
+            loadStage={playoffLoadStage}
+            onRetry={() => loadPlayoff(selectedPlayoffYear, true)}
             picksCache={playoffPicksCache}
             myName={myName}
             savePlayoffPicks={savePlayoffPicks}
@@ -4223,7 +4290,7 @@ const WT_SLOTS = [
   { key: "wild2", label: "Wildcard #2", conference: null },
 ];
 
-function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loading, picksCache, myName, saveWinTotalsPicks, slugToName }) {
+function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loading, loadStage, onRetry, picksCache, myName, saveWinTotalsPicks, slugToName }) {
   const mySlug = slugify(myName);
   const [selections, setSelections] = useState({}); // slotKey -> {teamId, side}
   const [saving, setSaving] = useState(false);
@@ -4260,7 +4327,7 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
   }
 
   if (selectedYear == null) return <Spinner label="Loading..." />;
-  if (loading && !board) return <Spinner label="Loading win totals board..." />;
+  if (loading && !board) return <DiagnosticSpinner label="Loading win totals board..." stage={loadStage} onRetry={onRetry} />;
   if (!board) return <EmptyState title={`${selectedYear} board not found`} body="This board may have been removed." />;
 
   const teamsById = {};
@@ -4855,7 +4922,7 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
 
 /* -------------------------------- playoff tab -------------------------------- */
 
-function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading, picksCache, myName, savePlayoffPicks, slugToName }) {
+function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading, loadStage, onRetry, picksCache, myName, savePlayoffPicks, slugToName }) {
   const mySlug = slugify(myName);
   const [selections, setSelections] = useState({}); // slotKey -> teamId
   const [saving, setSaving] = useState(false);
@@ -4892,7 +4959,7 @@ function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading,
   }
 
   if (selectedYear == null) return <Spinner label="Loading..." />;
-  if (loading && !board) return <Spinner label="Loading playoff board..." />;
+  if (loading && !board) return <DiagnosticSpinner label="Loading playoff board..." stage={loadStage} onRetry={onRetry} />;
   if (!board) return <EmptyState title={`${selectedYear} board not found`} body="This board may have been removed." />;
 
   const { tiersById, tier1, tier2, tier3 } = computePlayoffTiers(board.teams);

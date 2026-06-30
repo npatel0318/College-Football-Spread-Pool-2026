@@ -11,6 +11,20 @@ const firebaseConfig = {
 };
 
 export const app = initializeApp(firebaseConfig);
+
+// persistentLocalCache stores all Firestore reads in IndexedDB on the device.
+// This means data loads instantly from local storage even after mobile Safari
+// suspends the app and kills the JS context — no waiting for network reconnect.
+// The SDK syncs with the server in the background automatically.
+//
+// experimentalAutoDetectLongPolling: Firestore's default transport (WebChannel,
+// a long-lived streaming connection) has a well-known compatibility issue with
+// Safari/iOS — the connection can silently stall with no error and no timeout,
+// especially right after the tab is backgrounded or on a fresh cold start. This
+// setting makes the SDK detect when WebChannel isn't working and automatically
+// fall back to long-polling (plain HTTP requests), which is far more reliable
+// on Safari. Other browsers are unaffected — they keep using WebChannel.
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache(),
+  experimentalAutoDetectLongPolling: true,
 });
