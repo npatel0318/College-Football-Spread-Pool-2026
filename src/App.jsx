@@ -268,6 +268,19 @@ async function safeList(prefix, shared) {
   }
 }
 
+// Returns [{key, value}] in one network round trip instead of list() + N getGets.
+async function safeListValues(prefix, shared) {
+  try {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), 8000)
+    );
+    const r = await Promise.race([storage.listValues(prefix, shared), timeout]);
+    return r || [];
+  } catch (e) {
+    return [];
+  }
+}
+
 /* -------------------------------- small UI -------------------------------- */
 
 function Spinner({ label }) {
@@ -515,15 +528,13 @@ export default function App() {
       const weekObj = raw ? JSON.parse(raw) : null;
       setWeekCache((prev) => ({ ...prev, [weekNum]: weekObj }));
       if (withPicks) {
-        const list = await safeList(`week:${weekNum}:picks:`, true);
-        const keys = list;
+        const entries = await safeListValues(`week:${weekNum}:picks:`, true);
         const picksObj = {};
-        for (const k of keys) {
-          const raw2 = await safeGet(k, true);
-          if (!raw2) continue;
+        entries.forEach(({ key: k, value: raw2 }) => {
+          if (!raw2) return;
           const slug = k.slice(`week:${weekNum}:picks:`.length);
-          picksObj[slug] = JSON.parse(raw2);
-        }
+          try { picksObj[slug] = JSON.parse(raw2); } catch {}
+        });
         setPicksCache((prev) => ({ ...prev, [weekNum]: picksObj }));
       }
     } catch (e) {
@@ -838,11 +849,9 @@ export default function App() {
       const board = raw ? JSON.parse(raw) : null;
       setWinTotalsCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
-        const keys = await safeList(`wintotals:${year}:picks:`, true);
-        const results = await Promise.all(keys.map((k) => safeGet(k, true)));
+        const entries = await safeListValues(`wintotals:${year}:picks:`, true);
         const picksObj = {};
-        keys.forEach((k, i) => {
-          const raw2 = results[i];
+        entries.forEach(({ key: k, value: raw2 }) => {
           if (!raw2) return;
           const slug = k.slice(`wintotals:${year}:picks:`.length);
           try { picksObj[slug] = JSON.parse(raw2); } catch {}
@@ -937,11 +946,9 @@ export default function App() {
       const board = raw ? JSON.parse(raw) : null;
       setPlayoffCache((prev) => ({ ...prev, [year]: board }));
       if (withPicks) {
-        const keys = await safeList(`playoff:${year}:picks:`, true);
-        const results = await Promise.all(keys.map((k) => safeGet(k, true)));
+        const entries = await safeListValues(`playoff:${year}:picks:`, true);
         const picksObj = {};
-        keys.forEach((k, i) => {
-          const raw2 = results[i];
+        entries.forEach(({ key: k, value: raw2 }) => {
           if (!raw2) return;
           const slug = k.slice(`playoff:${year}:picks:`.length);
           try { picksObj[slug] = JSON.parse(raw2); } catch {}
@@ -1104,11 +1111,9 @@ export default function App() {
       if (!raw) continue;
       const weekObj = JSON.parse(raw);
       if (!weekObj.graded) continue;
-      const list = await safeList(`week:${w}:picks:`, true);
-      const keys = list;
+      const entries = await safeListValues(`week:${w}:picks:`, true);
       const weekWins = {};
-      for (const k of keys) {
-        const raw2 = await safeGet(k, true);
+      for (const { key: k, value: raw2 } of entries) {
         if (!raw2) continue;
         const picksObj = JSON.parse(raw2);
         const member = picksObj.name || slugToName[k.slice(`week:${w}:picks:`.length)];
@@ -1147,10 +1152,8 @@ export default function App() {
         const board = JSON.parse(raw);
         const teamsById = {};
         board.teams.forEach((t) => (teamsById[t.id] = t));
-        const list = await safeList(`wintotals:${wtYear}:picks:`, true);
-        const keys = list;
-        for (const k of keys) {
-          const raw2 = await safeGet(k, true);
+        const entries = await safeListValues(`wintotals:${wtYear}:picks:`, true);
+        for (const { value: raw2 } of entries) {
           if (!raw2) continue;
           const picksObj = JSON.parse(raw2);
           const member = picksObj.name;
@@ -1181,10 +1184,8 @@ export default function App() {
         const board = JSON.parse(raw);
         const teamsById = {};
         board.teams.forEach((t) => (teamsById[t.id] = t));
-        const list = await safeList(`playoff:${pYear}:picks:`, true);
-        const keys = list;
-        for (const k of keys) {
-          const raw2 = await safeGet(k, true);
+        const entries = await safeListValues(`playoff:${pYear}:picks:`, true);
+        for (const { value: raw2 } of entries) {
           if (!raw2) continue;
           const picksObj = JSON.parse(raw2);
           const member = picksObj.name;
@@ -1238,13 +1239,11 @@ export default function App() {
       if (!raw) continue;
       const weekObj = JSON.parse(raw);
       if (!weekObj.graded) continue;
-      const list = await safeList(`week:${w}:picks:`, true);
-      const keys = list;
+      const pickEntries = await safeListValues(`week:${w}:picks:`, true);
       const weekWins = {}; // member -> wins this week (only members who played)
       const picksByMember = {};
       const allPicksByMember = {}; // includes members who only submitted an underdog pick
-      for (const k of keys) {
-        const raw2 = await safeGet(k, true);
+      for (const { key: k, value: raw2 } of pickEntries) {
         if (!raw2) continue;
         const picksObj = JSON.parse(raw2);
         const member = picksObj.name || slugToName[k.slice(`week:${w}:picks:`.length)];

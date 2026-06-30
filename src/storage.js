@@ -142,4 +142,54 @@ export const storage = {
     }
     return { keys: [], prefix, shared: true };
   },
+
+  // Same prefixes as list(), but returns {key, value} pairs straight from the
+  // query snapshot — no follow-up getDoc per key. The query already pulled
+  // every document down; list() was throwing that data away and list()
+  // callers were re-fetching it one doc at a time, which is what made
+  // Win Totals / Playoff painfully slow on mobile Safari (N extra round
+  // trips, each one potentially re-establishing a suspended connection).
+  async listValues(prefix, shared = false) {
+    if (!shared) {
+      const list = await this.list(prefix, false);
+      return list.keys.map((k) => ({
+        key: k,
+        value: localStorage.getItem(LOCAL_PREFIX + k),
+      }));
+    }
+    let m = prefix.match(/^week:(\d+):picks:$/);
+    if (m) {
+      const weekNum = Number(m[1]);
+      const snap = await getDocs(
+        query(collection(db, "picks"), where("week", "==", weekNum))
+      );
+      return snap.docs.map((d) => ({
+        key: `week:${weekNum}:picks:${d.data().slug}`,
+        value: d.data().value,
+      }));
+    }
+    m = prefix.match(/^wintotals:(\d+):picks:$/);
+    if (m) {
+      const wtYear = Number(m[1]);
+      const snap = await getDocs(
+        query(collection(db, "winTotalsPicks"), where("wtYear", "==", wtYear))
+      );
+      return snap.docs.map((d) => ({
+        key: `wintotals:${wtYear}:picks:${d.data().slug}`,
+        value: d.data().value,
+      }));
+    }
+    m = prefix.match(/^playoff:(\d+):picks:$/);
+    if (m) {
+      const pYear = Number(m[1]);
+      const snap = await getDocs(
+        query(collection(db, "playoffPicks"), where("pYear", "==", pYear))
+      );
+      return snap.docs.map((d) => ({
+        key: `playoff:${pYear}:picks:${d.data().slug}`,
+        value: d.data().value,
+      }));
+    }
+    return [];
+  },
 };
