@@ -441,16 +441,61 @@ function FieldInput({ value, onChange, placeholder, type = "text", style, disabl
   );
 }
 
+// ---------- bootstrap helpers ----------
+// We cache a snapshot of leagueMeta + myName in localStorage so that every
+// session starts instantly, even on iOS Safari where the first cold Firestore
+// connection can take 5-10s.  The Firestore fetch still runs in the background
+// and will overwrite with fresh data — this is stale-while-revalidate.
+const BOOT_KEY = "cfbpool:__boot__";
+const NAME_KEY = "cfbpool:my-name";   // matches storage.js LOCAL_PREFIX + "my-name"
+
+function readBootstrap() {
+  try {
+    const raw = localStorage.getItem(BOOT_KEY);
+    const name = localStorage.getItem(NAME_KEY);
+    if (!raw || !name) return null;
+    const meta = JSON.parse(raw);
+    if (!meta?.members?.includes(name)) return null;
+    return { meta, name };
+  } catch {
+    return null;
+  }
+}
+
+function saveBootstrap(meta) {
+  try { localStorage.setItem(BOOT_KEY, JSON.stringify(meta)); } catch {}
+}
+
+function derivePhaseState(meta, name) {
+  const wtYears = meta.winTotalsYears || [];
+  const pYears  = meta.playoffYears  || [];
+  return {
+    phase:                   "app",
+    leagueMeta:              meta,
+    myName:                  name,
+    selectedWeek:            meta.weeks?.length ? Math.max(...meta.weeks) : null,
+    selectedWinTotalsYear:   wtYears.length ? Math.max(...wtYears) : null,
+    selectedPlayoffYear:     pYears.length  ? Math.max(...pYears)  : null,
+  };
+}
+
 /* --------------------------------- App ------------------------------------ */
 
 export default function App() {
-  const [phase, setPhase] = useState("loading"); // loading | setup | identify | app
-  const [leagueMeta, setLeagueMeta] = useState(null);
-  const [myName, setMyName] = useState(null);
+  // Derive initial state synchronously from localStorage bootstrap so the very
+  // first render already has the correct phase / selectedYear values — no
+  // waiting for Firestore on iOS Safari's cold connection.
+  const boot = readBootstrap();
+
+  const [phase, setPhase] = useState(boot ? "app" : "loading");
+  const [leagueMeta, setLeagueMeta] = useState(boot?.meta ?? null);
+  const [myName, setMyName] = useState(boot?.name ?? null);
   const [error, setError] = useState(null);
 
-  const [activeTab, setActiveTab] = useState("picks"); // picks | standings | commish
-  const [selectedWeek, setSelectedWeek] = useState(null);
+  const [activeTab, setActiveTab] = useState("picks");
+  const [selectedWeek, setSelectedWeek] = useState(
+    boot?.meta?.weeks?.length ? Math.max(...(boot.meta.weeks)) : null
+  );
 
   const [weekCache, setWeekCache] = useState({}); // weekNum -> {weekNum, games, locked, graded}
   const [picksCache, setPicksCache] = useState({}); // weekNum -> { memberSlug: {picks, name} }
@@ -460,13 +505,17 @@ export default function App() {
   const [standings, setStandings] = useState(null);
   const [standingsLoading, setStandingsLoading] = useState(false);
 
-  const [selectedWinTotalsYear, setSelectedWinTotalsYear] = useState(null);
+  const [selectedWinTotalsYear, setSelectedWinTotalsYear] = useState(
+    (boot?.meta?.winTotalsYears || []).length ? Math.max(...(boot.meta.winTotalsYears)) : null
+  );
   const [winTotalsCache, setWinTotalsCache] = useState({}); // year -> {year, teams, locked}
   const [winTotalsPicksCache, setWinTotalsPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
   const [winTotalsLoading, setWinTotalsLoading] = useState(false);
   const [winTotalsLoadStage, setWinTotalsLoadStage] = useState(null); // diagnostic: which await is in flight
 
-  const [selectedPlayoffYear, setSelectedPlayoffYear] = useState(null);
+  const [selectedPlayoffYear, setSelectedPlayoffYear] = useState(
+    (boot?.meta?.playoffYears || []).length ? Math.max(...(boot.meta.playoffYears)) : null
+  );
   const [playoffCache, setPlayoffCache] = useState({}); // year -> {year, teams, locked}
   const [playoffPicksCache, setPlayoffPicksCache] = useState({}); // year -> { slug: {name, picks, submittedAt} }
   const [playoffLoading, setPlayoffLoading] = useState(false);
@@ -490,22 +539,27 @@ export default function App() {
       const nameRaw = await safeGet("my-name", false);
       if (metaRaw) {
         const meta = JSON.parse(metaRaw);
-        setLeagueMeta(meta);
+        // Always save fresh data to bootstrap cache so next session is instant
+        saveBootstrap(meta);
+        setLeagueMeta(meta); saveBootstrap(meta);
         if (nameRaw && meta.members.includes(nameRaw)) {
           setMyName(nameRaw);
           setPhase("app");
-          const latest = meta.weeks.length ? Math.max(...meta.weeks) : null;
-          setSelectedWeek(latest);
+          setSelectedWeek(meta.weeks.length ? Math.max(...meta.weeks) : null);
           const wtYears = meta.winTotalsYears || [];
           setSelectedWinTotalsYear(wtYears.length ? Math.max(...wtYears) : null);
           const pYears = meta.playoffYears || [];
           setSelectedPlayoffYear(pYears.length ? Math.max(...pYears) : null);
-        } else {
+        } else if (!boot) {
+          // No bootstrap and not a member → go to identify
           setPhase("identify");
         }
-      } else {
+      } else if (!boot) {
+        // No Firestore data and no bootstrap → fresh install
         setPhase("setup");
       }
+      // If we had a bootstrap and Firestore timed out, we stay in "app" with
+      // cached data — better than a white screen.
     })();
   }, []);
 
@@ -537,6 +591,7 @@ export default function App() {
     }
     await storage.set("my-name", yourName.trim(), false).catch(() => null);
     setLeagueMeta(meta);
+    saveBootstrap(meta);
     setMyName(yourName.trim());
     setPhase("app");
   }
@@ -545,8 +600,13 @@ export default function App() {
     await storage.set("my-name", name, false).catch(() => null);
     setMyName(name);
     setPhase("app");
-    const latest = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) : null;
-    setSelectedWeek(latest);
+    setSelectedWeek(leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) : null);
+    const wtYears = leagueMeta.winTotalsYears || [];
+    setSelectedWinTotalsYear(wtYears.length ? Math.max(...wtYears) : null);
+    const pYears = leagueMeta.playoffYears || [];
+    setSelectedPlayoffYear(pYears.length ? Math.max(...pYears) : null);
+    // Save bootstrap so subsequent reloads in this Private session are instant too
+    saveBootstrap(leagueMeta);
   }
 
   async function joinNew(name) {
@@ -562,7 +622,7 @@ export default function App() {
       setError("Couldn't join the pool — try again.");
       return;
     }
-    setLeagueMeta(updated);
+    setLeagueMeta(updated); saveBootstrap(updated);
     await joinExisting(trimmed);
   }
 
@@ -726,7 +786,7 @@ export default function App() {
     if (!leagueMeta.weeks.includes(weekNum)) {
       const updatedMeta = { ...leagueMeta, weeks: [...leagueMeta.weeks, weekNum].sort((a, b) => a - b) };
       await storage.set("league-meta", JSON.stringify(updatedMeta), true).catch(() => null);
-      setLeagueMeta(updatedMeta);
+      setLeagueMeta(updatedMeta); saveBootstrap(updatedMeta);
     }
     return true;
   }
@@ -742,7 +802,7 @@ export default function App() {
     // Remove from leagueMeta
     const updatedMeta = { ...leagueMeta, weeks: leagueMeta.weeks.filter((w) => w !== weekNum) };
     await storage.set("league-meta", JSON.stringify(updatedMeta), true).catch(() => null);
-    setLeagueMeta(updatedMeta);
+    setLeagueMeta(updatedMeta); saveBootstrap(updatedMeta);
     setWeekCache((prev) => { const n = { ...prev }; delete n[weekNum]; return n; });
     setPicksCache((prev) => { const n = { ...prev }; delete n[weekNum]; return n; });
   }
@@ -750,7 +810,7 @@ export default function App() {
   async function deleteMember(name) {
     const updated = { ...leagueMeta, members: leagueMeta.members.filter((m) => m !== name) };
     const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
-    if (r) setLeagueMeta(updated);
+    if (r) setLeagueMeta(updated); saveBootstrap(updated);
   }
 
   async function toggleLock(weekNum) {
@@ -971,7 +1031,7 @@ export default function App() {
     if (!existingYears.includes(year)) {
       const updatedMeta = { ...leagueMeta, winTotalsYears: [...existingYears, year].sort((a, b) => a - b) };
       await storage.set("league-meta", JSON.stringify(updatedMeta), true).catch(() => null);
-      setLeagueMeta(updatedMeta);
+      setLeagueMeta(updatedMeta); saveBootstrap(updatedMeta);
     }
     return true;
   }
@@ -1072,7 +1132,7 @@ export default function App() {
     if (!existingYears.includes(year)) {
       const updatedMeta = { ...leagueMeta, playoffYears: [...existingYears, year].sort((a, b) => a - b) };
       await storage.set("league-meta", JSON.stringify(updatedMeta), true).catch(() => null);
-      setLeagueMeta(updatedMeta);
+      setLeagueMeta(updatedMeta); saveBootstrap(updatedMeta);
     }
     return true;
   }
@@ -1123,7 +1183,7 @@ export default function App() {
         setError("Reset partially failed while resaving league info — check the Firebase console.");
         return false;
       }
-      setLeagueMeta(freshMeta);
+      setLeagueMeta(freshMeta); saveBootstrap(freshMeta);
       setWeekCache({});
       setPicksCache({});
       setWinTotalsCache({});
@@ -1135,6 +1195,7 @@ export default function App() {
       setPlayoffPicksCache({});
       setSelectedPlayoffYear(null);
       await storage.delete("my-name", false).catch(() => null);
+      try { localStorage.removeItem(BOOT_KEY); } catch {}
       setMyName(null);
       setCommishUnlocked(false);
       setPasscodeInput("");
@@ -1402,7 +1463,7 @@ export default function App() {
       setError("Couldn't save money settings — try again.");
       return false;
     }
-    setLeagueMeta(updated);
+    setLeagueMeta(updated); saveBootstrap(updated);
     return true;
   }
 
@@ -1447,14 +1508,14 @@ export default function App() {
       setError("Couldn't finalize season payouts — try again.");
       return false;
     }
-    setLeagueMeta(updated);
+    setLeagueMeta(updated); saveBootstrap(updated);
     return true;
   }
 
   async function unfinalizeSeasonPayouts() {
     const updated = { ...leagueMeta, seasonFinalized: false, seasonPayouts: {} };
     const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
-    if (r) setLeagueMeta(updated);
+    if (r) setLeagueMeta(updated); saveBootstrap(updated);
   }
 
   /* ---------- history ---------- */
