@@ -2300,6 +2300,26 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       </span>
                     )}
                   </div>
+                  {/* Away @ Home / Away vs. Home line */}
+                  <div className="cfb-mono flex items-center gap-1.5 mb-2" style={{ fontSize: "0.72rem" }}>
+                    <span className="flex-1 text-right truncate" style={{ color: COLORS.chalkDim }}>
+                      {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : null}{g.away}
+                    </span>
+                    {g.neutral ? (
+                      <span
+                        className="flex-shrink-0 flex items-center gap-1 px-1.5 py-0.5"
+                        style={{ fontSize: "0.6rem", color: COLORS.muted, border: `1px solid ${COLORS.line}`, borderRadius: 10 }}
+                      >
+                        vs · neutral site
+                      </span>
+                    ) : (
+                      <span className="flex-shrink-0 font-bold" style={{ color: COLORS.gold, fontSize: "0.85rem" }}>@</span>
+                    )}
+                    <span className="flex-1 truncate" style={{ color: COLORS.chalkDim }}>
+                      {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : null}{g.home}
+                    </span>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-2">
                     {["away", "home"].map((side) => {
                       const lbl = side === "home" ? homeL : awayL;
@@ -2339,6 +2359,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                           onClick={() => savePick(selectedWeek, g.id, side)}
                           className="cfb-btn flex flex-col items-center justify-start px-2 py-3 text-center"
                           style={{
+                            position: "relative",
                             background: bg,
                             border: `${borderWidth} solid ${borderColor}`,
                             cursor: disabled ? "default" : "pointer",
@@ -2347,6 +2368,25 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                             minHeight: 90,
                           }}
                         >
+                          {/* AWAY / HOME chip — hidden for neutral-site games */}
+                          {!g.neutral && (
+                            <span
+                              className="cfb-mono"
+                              style={{
+                                position: "absolute",
+                                top: 4,
+                                left: side === "away" ? 4 : undefined,
+                                right: side === "home" ? 4 : undefined,
+                                fontSize: "0.58rem",
+                                letterSpacing: "0.07em",
+                                textTransform: "uppercase",
+                                color: isPicked ? COLORS.goldBright : COLORS.muted,
+                                opacity: 0.9,
+                              }}
+                            >
+                              {side}
+                            </span>
+                          )}
                           {teamLogo ? (
                             <img
                               src={teamLogo}
@@ -3119,6 +3159,7 @@ function getDatesInRange(fromDateStr, toDateStr) {
 async function fetchEspnGameMetadata(fromDate, toDate) {
   const networks = {}; // lowerName -> network string
   const teams = {};    // lowerName -> { logo, color, altColor, rank, conference }
+  const neutralGames = new Set(); // sorted "teamA__teamB" keys for neutral-site games
   const dates = getDatesInRange(fromDate, toDate);
   for (const yyyymmdd of dates) {
     try {
@@ -3135,12 +3176,17 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
         const network = networkNames[0] || "";
         // Conference name lives on the competition's groups object
         const confShort = comp.groups?.shortName || comp.groups?.name || "";
+        // Neutral site: ESPN sets competition.neutralSite = true for bowl games,
+        // CFP games, and neutral-site kickoff classic games
+        const isNeutral = comp.neutralSite === true;
+        const competitorNames = [];
         for (const competitor of comp.competitors || []) {
           const team = competitor.team;
           const name = team?.displayName;
           if (!name) continue;
           const key = name.toLowerCase();
           networks[key] = network;
+          competitorNames.push(key);
           if (!teams[key]) {
             const rawRank = competitor.curatedRank?.current;
             const rank = rawRank != null && rawRank >= 1 && rawRank <= 25 ? rawRank : null;
@@ -3153,12 +3199,16 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
             };
           }
         }
+        // Store neutral-site marker keyed by sorted team pair
+        if (isNeutral && competitorNames.length === 2) {
+          neutralGames.add(competitorNames.slice().sort().join("__"));
+        }
       }
     } catch (_) {
       // Non-fatal — ESPN is unofficial and may not have all dates yet
     }
   }
-  return { networks, teams };
+  return { networks, teams, neutralGames };
 }
 
 function hexToRgba(hex, alpha) {
@@ -3173,7 +3223,7 @@ function hexToRgba(hex, alpha) {
 function emptyGame() {
   return {
     id: newId(), away: "", home: "", favorite: "home", spread: "",
-    kickoffTime: "", kickoffISO: "", network: "",
+    kickoffTime: "", kickoffISO: "", network: "", neutral: false,
     homeLogo: "", awayLogo: "", homeColor: "", awayColor: "",
   };
 }
@@ -3412,7 +3462,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         .filter((g) => g.home && g.away && g.homePoint != null);
 
       // Secondary fetch: ESPN scoreboard for TV network + team branding (best-effort, no API key needed)
-      const { networks: espnNetworks, teams: espnTeams } = await fetchEspnGameMetadata(oddsFrom, oddsTo).catch(() => ({ networks: {}, teams: {} }));
+      const { networks: espnNetworks, teams: espnTeams, neutralGames } = await fetchEspnGameMetadata(oddsFrom, oddsTo).catch(() => ({ networks: {}, teams: {}, neutralGames: new Set() }));
 
       const withNetworks = merged.map((g) => {
         const homeKey = g.home.toLowerCase();
@@ -3423,6 +3473,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         const homeConf = homeTeam.conference || "";
         const awayConf = awayTeam.conference || "";
         const conference = homeConf === awayConf ? homeConf : (homeConf || awayConf || "");
+        const neutralKey = [homeKey, awayKey].sort().join("__");
         return {
           away: g.away,
           home: g.home,
@@ -3440,6 +3491,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           awayConf,
           awayRank: awayTeam.rank || null,
           homeRank: homeTeam.rank || null,
+          neutral: neutralGames.has(neutralKey),
         };
       });
 
@@ -4160,12 +4212,25 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                 <FieldInput type="number" value={g.spread} onChange={(v) => updateGame(idx, { spread: v })} placeholder="spread" />
               </div>
             </div>
-            <div className="mt-1.5">
+            <div className="mt-1.5 flex items-center gap-2">
               <FieldInput
                 value={g.kickoffTime || ""}
                 onChange={(v) => updateGame(idx, { kickoffTime: v })}
                 placeholder="Kickoff (e.g. Sat 11:00 AM CT)"
               />
+              <button
+                onClick={() => updateGame(idx, { neutral: !g.neutral })}
+                className="cfb-mono text-xs px-2.5 py-2 flex-shrink-0 flex items-center gap-1.5"
+                style={{
+                  background: g.neutral ? "rgba(217,164,65,0.12)" : "transparent",
+                  border: `1px solid ${g.neutral ? COLORS.gold : COLORS.lineStrong}`,
+                  color: g.neutral ? COLORS.goldBright : COLORS.muted,
+                  whiteSpace: "nowrap",
+                }}
+                title="Toggle neutral site game"
+              >
+                ⚑ {g.neutral ? "neutral" : "@ site"}
+              </button>
             </div>
             <div className="mt-1.5">
               <FieldInput
