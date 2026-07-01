@@ -2301,21 +2301,52 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                     )}
                   </div>
                   {/* Away @ Home / Away vs. Home line */}
-                  <div className="cfb-mono flex items-center gap-1.5 mb-2" style={{ fontSize: "0.72rem" }}>
-                    <span className="flex-1 text-right truncate" style={{ color: COLORS.chalkDim, minWidth: 0 }}>
+                  <div
+                    className="cfb-mono mb-2"
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr auto 1fr",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: "0.72rem",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <span
+                      style={{
+                        textAlign: "right",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        color: COLORS.chalkDim,
+                      }}
+                    >
                       {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : null}{g.away}
                     </span>
                     {g.neutral ? (
                       <span
-                        className="flex-shrink-0 flex items-center gap-1 px-1.5 py-0.5"
-                        style={{ fontSize: "0.6rem", color: COLORS.muted, border: `1px solid ${COLORS.line}`, borderRadius: 10 }}
+                        style={{
+                          fontSize: "0.6rem",
+                          color: COLORS.muted,
+                          border: `1px solid ${COLORS.line}`,
+                          borderRadius: 10,
+                          padding: "2px 6px",
+                          whiteSpace: "nowrap",
+                        }}
                       >
-                        vs · neutral site
+                        vs · neutral
                       </span>
                     ) : (
-                      <span className="flex-shrink-0 font-bold" style={{ color: COLORS.gold, fontSize: "0.85rem" }}>@</span>
+                      <span style={{ color: COLORS.gold, fontWeight: "bold", fontSize: "0.85rem", textAlign: "center" }}>@</span>
                     )}
-                    <span className="flex-1 truncate" style={{ color: COLORS.chalkDim, minWidth: 0 }}>
+                    <span
+                      style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        color: COLORS.chalkDim,
+                      }}
+                    >
                       {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : null}{g.home}
                     </span>
                   </div>
