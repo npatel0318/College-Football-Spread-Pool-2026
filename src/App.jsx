@@ -29,6 +29,7 @@ import {
   Copy,
   Eye,
   Clock,
+  MoreHorizontal,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -1706,8 +1707,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* week selector */}
-        {leagueMeta.weeks.length > 0 && (
+        {/* week selector — shown in header only on picks tab */}
+        {activeTab === "picks" && leagueMeta.weeks.length > 0 && (
           <div className="flex items-center gap-2 mt-4 overflow-x-auto cfb-scroll pb-1">
             {leagueMeta.weeks
               .slice()
@@ -1730,48 +1731,8 @@ export default function App() {
         )}
       </div>
 
-      {/* tab nav */}
-      <div
-        className="flex overflow-x-auto cfb-tab-nav"
-        style={{
-          background: COLORS.fieldDark,
-          borderBottom: `1px solid ${COLORS.line}`,
-          scrollbarWidth: "none",
-          msOverflowStyle: "none",
-          WebkitOverflowScrolling: "touch",
-        }}
-      >
-        {[
-          { id: "money", label: "Money", icon: DollarSign },
-          { id: "playoff", label: "Playoff", icon: Award },
-          { id: "wintotals", label: "Win Totals", icon: Target },
-          { id: "picks", label: "Picks", icon: CheckCircle2 },
-          { id: "standings", label: "Standings", icon: Trophy },
-          { id: "history", label: "History", icon: Clock },
-          { id: "commish", label: "Commish", icon: Shield },
-        ].map((t) => {
-          const Icon = t.icon;
-          const active = activeTab === t.id;
-          return (
-            <button
-              key={t.id}
-              onClick={() => setActiveTab(t.id)}
-              className="cfb-mono cfb-btn flex-shrink-0 flex items-center justify-center gap-1 text-xs font-bold uppercase tracking-wider py-3 px-4"
-              style={{
-                color: active ? COLORS.goldBright : COLORS.chalkDim,
-                borderBottom: active ? `2px solid ${COLORS.gold}` : "2px solid transparent",
-                background: active ? "rgba(217,164,65,0.06)" : "transparent",
-                whiteSpace: "nowrap",
-              }}
-            >
-              <Icon size={13} />
-              {t.label}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="p-4 max-w-2xl mx-auto">
+      {/* main content — padded bottom so nothing hides behind the tab bar */}
+      <div className="p-4 max-w-2xl mx-auto" style={{ paddingBottom: "calc(72px + env(safe-area-inset-bottom))" }}>
         {error && <div className="mb-3"><Banner onDismiss={() => setError(null)}>{error}</Banner></div>}
 
         {activeTab === "picks" && (
@@ -1897,7 +1858,150 @@ export default function App() {
         )}
       </div>
 
+      <BottomTabBar activeTab={activeTab} setActiveTab={setActiveTab} />
     </div>
+  );
+}
+
+/* ----------------------------- bottom tab bar ------------------------------ */
+
+const TAB_BAR_HEIGHT = 56;
+
+const PRIMARY_TABS = [
+  { id: "picks",     label: "Picks",     icon: CheckCircle2 },
+  { id: "standings", label: "Standings", icon: Trophy       },
+  { id: "wintotals", label: "Win Tot.",  icon: Target       },
+  { id: "playoff",   label: "Playoff",   icon: Award        },
+];
+const MORE_TABS = [
+  { id: "money",   label: "Money",   icon: DollarSign },
+  { id: "history", label: "History", icon: Clock      },
+  { id: "commish", label: "Commish", icon: Shield     },
+];
+
+function BottomTabBar({ activeTab, setActiveTab }) {
+  const [showMore, setShowMore] = useState(false);
+  const activeMore = MORE_TABS.find((t) => t.id === activeTab);
+
+  const tabBarStyle = {
+    position: "fixed",
+    bottom: 0, left: 0, right: 0,
+    zIndex: 50,
+    background: COLORS.fieldDark,
+    borderTop: `1px solid ${COLORS.line}`,
+    display: "flex",
+    height: `calc(${TAB_BAR_HEIGHT}px + env(safe-area-inset-bottom))`,
+    paddingBottom: "env(safe-area-inset-bottom)",
+  };
+
+  const tabBtn = (active) => ({
+    flex: 1,
+    display: "flex", flexDirection: "column",
+    alignItems: "center", justifyContent: "center",
+    gap: 3,
+    background: "transparent",
+    color: active ? COLORS.goldBright : "#55555e",
+    WebkitTapHighlightColor: "transparent",
+    cursor: "pointer",
+    border: "none",
+    padding: 0,
+    minWidth: 0,
+  });
+
+  return (
+    <>
+      {/* backdrop — closes the More menu when tapping outside */}
+      {showMore && (
+        <div
+          onClick={() => setShowMore(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 48 }}
+        />
+      )}
+
+      {/* More slide-up panel */}
+      {showMore && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: `calc(${TAB_BAR_HEIGHT}px + env(safe-area-inset-bottom))`,
+            left: 0, right: 0,
+            background: COLORS.fieldMid,
+            borderTop: `1px solid ${COLORS.lineStrong}`,
+            zIndex: 49,
+          }}
+        >
+          {MORE_TABS.map((t) => {
+            const Icon = t.icon;
+            const active = activeTab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => { setActiveTab(t.id); setShowMore(false); }}
+                style={{
+                  display: "flex", width: "100%", alignItems: "center",
+                  gap: 16, padding: "16px 24px",
+                  background: active ? "rgba(217,164,65,0.07)" : "transparent",
+                  color: active ? COLORS.goldBright : COLORS.chalk,
+                  borderBottom: `1px solid ${COLORS.line}`,
+                  WebkitTapHighlightColor: "transparent",
+                  cursor: "pointer", border: "none",
+                  borderBottom: `1px solid ${COLORS.line}`,
+                }}
+                className="cfb-mono text-sm font-bold uppercase tracking-wider"
+              >
+                <Icon size={18} style={{ color: active ? COLORS.goldBright : COLORS.chalkDim, flexShrink: 0 }} />
+                {t.label}
+                {active && <CheckCircle2 size={14} style={{ color: COLORS.goldBright, marginLeft: "auto" }} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* the bar itself */}
+      <div style={tabBarStyle}>
+        {PRIMARY_TABS.map((t) => {
+          const Icon = t.icon;
+          const active = activeTab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => { setActiveTab(t.id); setShowMore(false); }}
+              style={tabBtn(active)}
+              aria-label={t.label}
+            >
+              <Icon size={22} strokeWidth={active ? 2.2 : 1.8} />
+              <span className="cfb-mono" style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                {t.label}
+              </span>
+            </button>
+          );
+        })}
+
+        {/* More button — shows dot if a secondary tab is active */}
+        <button
+          onClick={() => setShowMore((s) => !s)}
+          style={{ ...tabBtn(!!activeMore || showMore), position: "relative" }}
+          aria-label="More tabs"
+        >
+          {activeMore ? (
+            <activeMore.icon size={22} strokeWidth={2.2} />
+          ) : (
+            <MoreHorizontal size={22} strokeWidth={1.8} />
+          )}
+          <span className="cfb-mono" style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            {activeMore ? activeMore.label : "More"}
+          </span>
+          {activeMore && (
+            <div style={{
+              position: "absolute", top: 8, right: "calc(50% - 16px)",
+              width: 6, height: 6, borderRadius: "50%",
+              background: COLORS.gold,
+            }} />
+          )}
+        </button>
+      </div>
+    </>
   );
 }
 
