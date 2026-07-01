@@ -2302,7 +2302,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                   </div>
                   {/* Away @ Home / Away vs. Home line */}
                   <div className="cfb-mono flex items-center gap-1.5 mb-2" style={{ fontSize: "0.72rem" }}>
-                    <span className="flex-1 text-right truncate" style={{ color: COLORS.chalkDim }}>
+                    <span className="flex-1 text-right truncate" style={{ color: COLORS.chalkDim, minWidth: 0 }}>
                       {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : null}{g.away}
                     </span>
                     {g.neutral ? (
@@ -2315,7 +2315,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                     ) : (
                       <span className="flex-shrink-0 font-bold" style={{ color: COLORS.gold, fontSize: "0.85rem" }}>@</span>
                     )}
-                    <span className="flex-1 truncate" style={{ color: COLORS.chalkDim }}>
+                    <span className="flex-1 truncate" style={{ color: COLORS.chalkDim, minWidth: 0 }}>
                       {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : null}{g.home}
                     </span>
                   </div>
