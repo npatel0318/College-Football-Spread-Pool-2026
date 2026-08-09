@@ -2124,6 +2124,147 @@ function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
 
 /* ------------------------------- picks tab --------------------------------- */
 
+function LiveScorePanel({ game, data }) {
+  if (!data) return null;
+  // Don't render if the game hasn't started (no period yet)
+  if (!data.inProgress && !data.completed) return null;
+
+  const {
+    homeScore, awayScore, completed, inProgress,
+    period, clock, shortDetail, downDistance,
+    isRedZone, possession,
+  } = data;
+
+  const awayAbbr = teamAbbrev(game.away);
+  const homeAbbr = teamAbbrev(game.home);
+
+  const periodLabel =
+    period > 4
+      ? period === 5 ? "OT" : `${period - 4}OT`
+      : period > 0 ? `Q${period}` : "";
+
+  const isHalf =
+    !completed &&
+    (shortDetail?.toLowerCase().includes("half") ||
+      (period === 2 && clock === "0:00"));
+
+  const clockLine = isHalf
+    ? "HALFTIME"
+    : completed
+    ? shortDetail || "FINAL"
+    : clock
+    ? `${periodLabel} · ${clock}`
+    : periodLabel;
+
+  const awayNum = parseInt(awayScore, 10);
+  const homeNum = parseInt(homeScore, 10);
+  const awayLeads = !isNaN(awayNum) && !isNaN(homeNum) && awayNum > homeNum;
+  const homeLeads = !isNaN(homeNum) && !isNaN(awayNum) && homeNum > awayNum;
+
+  return (
+    <div
+      style={{
+        background: "#0e0e11",
+        border: `1px solid ${isRedZone && inProgress ? "rgba(220,60,60,0.45)" : COLORS.lineStrong}`,
+        borderRadius: 5,
+        padding: "10px 12px",
+        marginBottom: 8,
+      }}
+    >
+      {/* Status row */}
+      <div
+        className="cfb-mono flex items-center justify-between"
+        style={{ marginBottom: 8, fontSize: "0.67rem", letterSpacing: "0.06em" }}
+      >
+        <span
+          className="flex items-center gap-1.5"
+          style={{ color: inProgress ? "#e05050" : COLORS.chalkDim, fontWeight: 700 }}
+        >
+          {inProgress && (
+            <span
+              className="animate-pulse"
+              style={{ width: 6, height: 6, borderRadius: "50%", background: "#e05050", display: "inline-block" }}
+            />
+          )}
+          {completed ? "FINAL" : inProgress ? "LIVE" : ""}
+        </span>
+        <span style={{ color: COLORS.chalkDim }}>{clockLine}</span>
+      </div>
+
+      {/* Scores */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr auto 1fr",
+          alignItems: "center",
+          gap: 8,
+          textAlign: "center",
+        }}
+      >
+        {/* Away */}
+        <div>
+          <div
+            className="cfb-mono flex items-center justify-center gap-1"
+            style={{
+              fontSize: "0.62rem", letterSpacing: "0.07em", marginBottom: 3,
+              color: possession === "away" ? COLORS.goldBright : COLORS.muted,
+            }}
+          >
+            {possession === "away" && <span>🏈</span>}
+            <span>{awayAbbr}</span>
+          </div>
+          <div
+            className="cfb-mono font-bold"
+            style={{ fontSize: "2.1rem", lineHeight: 1, color: awayLeads ? COLORS.chalk : COLORS.chalkDim }}
+          >
+            {awayScore}
+          </div>
+        </div>
+
+        {/* Middle: down & distance */}
+        <div style={{ paddingTop: 16, minWidth: 72 }}>
+          {!isHalf && !completed && downDistance ? (
+            <div
+              className="cfb-mono"
+              style={{
+                fontSize: "0.6rem",
+                color: isRedZone ? "#e05050" : COLORS.muted,
+                whiteSpace: "nowrap",
+                textAlign: "center",
+                lineHeight: 1.4,
+              }}
+            >
+              {downDistance}
+            </div>
+          ) : (
+            <div style={{ color: COLORS.muted, textAlign: "center" }}>—</div>
+          )}
+        </div>
+
+        {/* Home */}
+        <div>
+          <div
+            className="cfb-mono flex items-center justify-center gap-1"
+            style={{
+              fontSize: "0.62rem", letterSpacing: "0.07em", marginBottom: 3,
+              color: possession === "home" ? COLORS.goldBright : COLORS.muted,
+            }}
+          >
+            <span>{homeAbbr}</span>
+            {possession === "home" && <span>🏈</span>}
+          </div>
+          <div
+            className="cfb-mono font-bold"
+            style={{ fontSize: "2.1rem", lineHeight: 1, color: homeLeads ? COLORS.chalk : COLORS.chalkDim }}
+          >
+            {homeScore}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock, saveUnderdogPick, lastAutoCheckTime }) {
   const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone" | "standings"
   const [autoLockTick, setAutoLockTick] = useState(0); // incremented to force re-render at kickoff
@@ -2169,6 +2310,24 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
 
   // Plain computation — safe after the early-return guards above.
   const autoLockedGameIds = computeAutoLockStatus(week.games);
+
+  // Live score polling — fires immediately when games lock, then every 30s.
+  const [liveScores, setLiveScores] = useState({});
+  const liveTimerRef = useRef(null);
+  const lockedCount = autoLockedGameIds.size;
+
+  useEffect(() => {
+    if (liveTimerRef.current) clearInterval(liveTimerRef.current);
+    if (!week || lockedCount === 0 || week.graded) return;
+    let stale = false;
+    async function refresh() {
+      const data = await fetchLiveGameDetails(week).catch(() => null);
+      if (!stale && data) setLiveScores(data);
+    }
+    refresh();
+    liveTimerRef.current = setInterval(refresh, 30_000);
+    return () => { stale = true; clearInterval(liveTimerRef.current); };
+  }, [selectedWeek, lockedCount, week?.graded]); // eslint-disable-line
 
   const myCorrect = week.graded
     ? week.games.reduce((acc, g) => {
@@ -2350,6 +2509,11 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : null}{g.home}
                     </span>
                   </div>
+
+                  {/* Live score panel — shows for any locked game that ESPN has data for */}
+                  {(autoLockedGameIds.has(g.id) || week.locked) && (
+                    <LiveScorePanel game={g} data={liveScores[g.id]} />
+                  )}
 
                   <div className="grid grid-cols-2 gap-2">
                     {["away", "home"].map((side) => {
@@ -3175,8 +3339,101 @@ function toCST(isoStr) {
   }) + " CT";
 }
 
-function getDatesInRange(fromDateStr, toDateStr) {
-  const dates = [];
+// Abbreviate a team name to 2-4 letters for compact score display
+function teamAbbrev(name) {
+  if (!name) return "";
+  const words = name.split(/\s+/).filter((w) => w && w !== "&");
+  if (words.length === 1) return words[0].slice(0, 4).toUpperCase();
+  if (words.length === 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return words.slice(0, 3).map((w) => w[0]).join("").toUpperCase();
+}
+
+// Fetch live ESPN game data (score, clock, down/distance, possession) for all
+// games in a week. Returns a map of { [game.id]: liveData }. Non-fatal — any
+// game that doesn't match ESPN is simply absent from the result.
+async function fetchLiveGameDetails(week) {
+  const games = week?.games || [];
+  if (!games.length) return {};
+
+  // Date range from stored weekDates, individual kickoffISO fields, or today
+  let dates = [];
+  if (week.weekDates?.from && week.weekDates?.to) {
+    dates = getDatesInRange(week.weekDates.from, week.weekDates.to);
+  } else {
+    const isoSet = new Set();
+    for (const g of games) {
+      if (g.kickoffISO) isoSet.add(g.kickoffISO.slice(0, 10).replace(/-/g, ""));
+    }
+    dates = isoSet.size
+      ? [...isoSet]
+      : [new Date().toISOString().slice(0, 10).replace(/-/g, "")];
+  }
+
+  const liveData = {};
+
+  for (const yyyymmdd of dates) {
+    try {
+      const res = await fetch(
+        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=${yyyymmdd}&limit=200`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+
+      for (const event of data.events || []) {
+        const comp = event.competitions?.[0];
+        if (!comp) continue;
+        const homeComp = comp.competitors?.find((c) => c.homeAway === "home");
+        const awayComp = comp.competitors?.find((c) => c.homeAway === "away");
+        if (!homeComp || !awayComp) continue;
+
+        const espnHome = (homeComp.team?.displayName || "").toLowerCase();
+        const espnAway = (awayComp.team?.displayName || "").toLowerCase();
+
+        // 3-level matching (same as matchGameToEspn in App)
+        const game = games.find((g) => {
+          const h = (g.home || "").toLowerCase();
+          const a = (g.away || "").toLowerCase();
+          if (espnHome === h && espnAway === a) return true;
+          if (espnHome === h) return true;
+          return (
+            espnHome.startsWith(h.split(" ")[0]) &&
+            espnAway.startsWith(a.split(" ")[0])
+          );
+        });
+        if (!game) continue;
+
+        const status = comp.status;
+        const sit = comp.situation;
+        const possId = sit?.possession;
+        const period = status.period || 0;
+        const completed = status.type?.completed === true;
+
+        liveData[game.id] = {
+          homeScore: homeComp.score ?? "—",
+          awayScore: awayComp.score ?? "—",
+          completed,
+          inProgress: !completed && period > 0,
+          period,
+          clock: status.displayClock || "",
+          shortDetail: status.type?.shortDetail || "",
+          downDistance:
+            sit?.downDistanceText || sit?.shortDownDistanceText || "",
+          isRedZone: sit?.isRedZone || false,
+          possession:
+            possId === homeComp.id
+              ? "home"
+              : possId === awayComp.id
+              ? "away"
+              : null,
+        };
+      }
+    } catch (_) { /* non-fatal */ }
+  }
+
+  return liveData;
+}
+
+function getDatesInRange(fromDateStr, toDateStr) {  const dates = [];
   const start = new Date(fromDateStr + "T00:00:00");
   const end = new Date(toDateStr + "T23:59:59");
   const cur = new Date(start);
