@@ -2324,6 +2324,14 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
     return <EmptyState title={`Week ${selectedWeek} not found`} body="This week may have been removed." />;
   }
 
+  const mySlug = slugify(myName);
+  const myPicks = picksCache[selectedWeek]?.[mySlug]?.picks || {};
+  const myLockedGameId = picksCache[selectedWeek]?.[mySlug]?.lockedGameId || null;
+  const myUnderdogPick = picksCache[selectedWeek]?.[mySlug]?.underdogPick || null;
+  const myUnderdogResult = picksCache[selectedWeek]?.[mySlug]?.underdogResult ?? null;
+  const allEntries = Object.entries(picksCache[selectedWeek] || {});
+  const submittedCount = allEntries.filter(([, v]) => v && Object.keys(v.picks || {}).length > 0).length;
+
   const myCorrect = week.graded
     ? week.games.reduce((acc, g) => {
         const cover = coveringSide(g);
