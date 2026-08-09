@@ -2815,8 +2815,8 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
     return coveringSide(g) === "push";
   }).length;
 
-  // Build per-member rows
-  const rows = members.map((name) => {
+  // ── Base rows (actual picks vs results) ─────────────────────────────────
+  const baseRows = members.map((name) => {
     const slug = slugify(name);
     const memberPicks = picksCache[slug]?.picks || {};
     const lockedGameId = picksCache[slug]?.lockedGameId || null;
@@ -2848,45 +2848,80 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
       udAmount = underdogPayout(udGame?.spread || 0, settings);
     }
 
-    const pending = totalGames - wins - losses - pushGameCount;
-    return { name, wins, losses, pending, lockResult, submitted, underdogResult, udAmount };
+    return { name, wins, losses, lockResult, submitted, underdogResult, udAmount, synthetic: false };
   });
 
-  // Weekly winner/loser projection —————————————————————————————————————
-  // Only project once at least one game has scored
-  const winnerMoney = {}; // name → amount (positive)
-  const loserMoney  = {}; // name → amount (negative)
+  // ── Synthetic records for non-submitters ─────────────────────────────────
+  // Non-submitters get 1 fewer win than the worst submitted record, clamped at 0.
+  // This makes them the automatic loser without going negative.
+  const rows = (() => {
+    if (completedCount === 0) {
+      return baseRows.map((r) => ({
+        ...r,
+        pending: totalGames - r.wins - r.losses - pushGameCount,
+      }));
+    }
+    const submittedWins = baseRows.filter((r) => r.submitted).map((r) => r.wins);
+    const worstWins = submittedWins.length > 0 ? Math.min(...submittedWins) : 0;
+    const synWins   = Math.max(worstWins - 1, 0);
+    const synLosses = completedCount - synWins;
 
-  if (completedCount > 0) {
-    const active = rows.filter((r) => r.submitted);
-    if (active.length > 1) {
-      const maxWins = Math.max(...active.map((r) => r.wins));
-      const minWins = Math.min(...active.map((r) => r.wins));
+    return baseRows.map((r) => {
+      if (r.submitted) {
+        return { ...r, pending: totalGames - r.wins - r.losses - pushGameCount };
+      }
+      return {
+        ...r,
+        wins:    synWins,
+        losses:  synLosses,
+        pending: Math.max(totalGames - completedCount, 0),
+        synthetic: true,
+      };
+    });
+  })();
 
-      if (maxWins > minWins) {
-        // Winners: all tied at most wins, split evenly
-        const winners = active.filter((r) => r.wins === maxWins);
-        const winShare = Math.round((settings.weeklyWinAmount / winners.length) * 100) / 100;
-        winners.forEach((r) => { winnerMoney[r.name] = winShare; });
+  // ── Sort: most wins first, ties broken by fewest losses ──────────────────
+  rows.sort((a, b) => b.wins - a.wins || a.losses - b.losses);
 
-        // Losers: fewest wins; tie-break by most losses; split evenly
-        const maxLossesAtMin = Math.max(
-          ...active.filter((r) => r.wins === minWins).map((r) => r.losses)
-        );
-        const losers = active.filter(
-          (r) => r.wins === minWins && r.losses === maxLossesAtMin
-        );
-        const loseShare = Math.round((settings.weeklyLossAmount / losers.length) * 100) / 100;
-        losers.forEach((r) => { loserMoney[r.name] = -loseShare; });
+  // ── Winner / loser money ─────────────────────────────────────────────────
+  const winnerMoney = {};
+  const loserMoney  = {};
+  let perfectWeek   = false;
+
+  if (completedCount > 0 && rows.length > 1) {
+    const maxWins = rows[0].wins;
+    const minWins = rows[rows.length - 1].wins;
+
+    if (maxWins > minWins) {
+      // WINNERS — submitted members only; can't win if you didn't pick
+      const submittedWinners = rows.filter((r) => r.submitted && r.wins === maxWins);
+      if (submittedWinners.length > 0) {
+        perfectWeek = allDone && maxWins === totalGames && totalGames > 0;
+        const prizePool = perfectWeek ? settings.weeklyWinAmount * 2 : settings.weeklyWinAmount;
+        const winShare  = Math.round((prizePool / submittedWinners.length) * 100) / 100;
+        submittedWinners.forEach((r) => { winnerMoney[r.name] = winShare; });
+      }
+
+      // LOSERS — worst record overall (includes synthetic no-picks records)
+      const minLosers = rows.filter((r) => r.wins === minWins);
+      const maxLossesAtMin = Math.max(...minLosers.map((r) => r.losses));
+      const losers = minLosers.filter((r) => r.losses === maxLossesAtMin);
+
+      // Guard: skip if a loser is also the winner (degenerate single-player case)
+      const winnerSet = new Set(Object.keys(winnerMoney));
+      const actualLosers = losers.filter((r) => !winnerSet.has(r.name));
+
+      if (actualLosers.length > 0) {
+        // Doubling rule: any submitted member going 0-10 doubles the pool.
+        // Two no-picks members (synthetic 0-10) do NOT trigger doubling.
+        const submittedZeroWins = rows.filter((r) => r.submitted && r.wins === 0);
+        const doubled = allDone && minWins === 0 && submittedZeroWins.length >= 1;
+        const losePool = doubled ? settings.weeklyLossAmount * 2 : settings.weeklyLossAmount;
+        const loseShare = Math.round((losePool / actualLosers.length) * 100) / 100;
+        actualLosers.forEach((r) => { loserMoney[r.name] = -loseShare; });
       }
     }
   }
-
-  // Sort: most wins first; ties broken by fewest losses
-  rows.sort((a, b) => {
-    if (b.wins !== a.wins) return b.wins - a.wins;
-    return a.losses - b.losses;
-  });
 
   const noScoresYet = completedCount === 0;
 
@@ -2959,6 +2994,9 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
                   <td className="px-3 py-2 font-semibold" style={{ color: r.submitted ? COLORS.chalk : COLORS.muted }}>
                     {r.name}
                     {!r.submitted && <span className="cfb-mono font-normal text-xs ml-1.5" style={{ color: COLORS.muted }}>no picks</span>}
+                    {perfectWeek && winnerMoney[r.name] && (
+                      <span className="cfb-mono font-bold text-xs ml-1.5" style={{ color: COLORS.gold }}>🎯 perfect!</span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right font-bold" style={{ color: r.wins > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
                     {r.wins}
