@@ -442,12 +442,25 @@ function generateToken() {
     return Math.random().toString(36).slice(2, 10);
   }
 }
-function readInviteFromHash() {
-  const h = window.location.hash;
-  return h.startsWith("#join/") ? h.slice(6) : null;
+function readTokenFromHash() {
+  const h = window.location.hash.slice(1);
+  if (!h) return null;
+  if (h.startsWith("join/")) return h.slice(5); // explicit invite link: #join/TOKEN
+  if (/^[a-z0-9]{8}$/.test(h)) return h;        // bare token: #TOKEN (home screen shortcut)
+  return null;
 }
-function clearInviteHash() {
-  try { history.replaceState(null, "", window.location.pathname + window.location.search); } catch {}
+
+// After authentication, replace the URL hash with just the token.
+// This means the URL becomes yoursite.com/#abc12345 — a clean permanent link
+// that works perfectly as a home screen shortcut on iOS: every launch from the
+// shortcut re-authenticates from the hash, bypassing localStorage entirely.
+function setAuthHash(token) {
+  try {
+    history.replaceState(
+      null, "",
+      window.location.pathname + window.location.search + "#" + token
+    );
+  } catch {}
 }
 function inviteUrl(token) {
   return `${window.location.origin}${window.location.pathname}#join/${token}`;
@@ -553,7 +566,7 @@ export default function App() {
   /* ---------- initial load ---------- */
   useEffect(() => {
     (async () => {
-      const inviteToken = readInviteFromHash(); // read before any async work
+      const inviteToken = readTokenFromHash(); // read before any async work
       const metaRaw = await safeGet("league-meta", true);
       if (!metaRaw) {
         if (!boot) setPhase("setup");
@@ -589,12 +602,12 @@ export default function App() {
         saveBootstrap(meta);
       }
 
-      // 1. INVITE LINK: if a #join/TOKEN hash is present, authenticate from it
+      // 1. INVITE LINK or HOME SCREEN SHORTCUT: token present in URL hash
       if (inviteToken) {
         const slug = Object.keys(tokens).find((s) => tokens[s] === inviteToken);
         const name = slug ? meta.members.find((m) => slugify(m) === slug) : null;
         if (name) {
-          clearInviteHash();
+          setAuthHash(inviteToken); // keep token in URL for home screen shortcut
           await storage.set("my-name", name, false).catch(() => null);
           localStorage.setItem(TOKEN_KEY, inviteToken);
           goToApp(name);
@@ -610,7 +623,8 @@ export default function App() {
         const storedToken = localStorage.getItem(TOKEN_KEY);
 
         if (storedToken && storedToken === expectedToken) {
-          // Valid token on file — proceed
+          // Valid token on file — set URL hash so home screen shortcuts work
+          setAuthHash(expectedToken);
           goToApp(nameRaw);
           return;
         }
@@ -619,6 +633,7 @@ export default function App() {
           // GRACE PERIOD: member was authenticated before tokens existed.
           // Auto-grant their token once so existing sessions aren't disrupted.
           localStorage.setItem(TOKEN_KEY, expectedToken);
+          setAuthHash(expectedToken);
           goToApp(nameRaw);
           return;
         }
