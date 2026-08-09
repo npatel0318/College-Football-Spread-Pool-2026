@@ -795,6 +795,22 @@ export default function App() {
     setPicksCache((prev) => { const n = { ...prev }; delete n[weekNum]; return n; });
   }
 
+  async function addMember(name) {
+    const updated = { ...leagueMeta, members: [...leagueMeta.members, name] };
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (r) { setLeagueMeta(updated); saveBootstrap(updated); }
+  }
+
+  async function saveWeeklyAdjustments(weekNum, adjustmentsForWeek) {
+    // adjustmentsForWeek: { [memberSlug]: dollarAmount }
+    const existing = leagueMeta.weeklyAdjustments || {};
+    const merged = { ...existing, [weekNum]: adjustmentsForWeek };
+    const updated = { ...leagueMeta, weeklyAdjustments: merged };
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (r) { setLeagueMeta(updated); saveBootstrap(updated); }
+    return !!r;
+  }
+
   async function deleteMember(name) {
     const updated = { ...leagueMeta, members: leagueMeta.members.filter((m) => m !== name) };
     const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
@@ -1431,8 +1447,21 @@ export default function App() {
       totalLockLossesOwed += m.lockLoss;
       totalUnderdogWinsPaid += m.underdogWin;
     });
+
+    // Apply commissioner adjustments on top of computed amounts
+    const adjustments = leagueMeta.weeklyAdjustments || {};
+    let totalAdjustments = 0;
+    Object.entries(adjustments).forEach(([weekNum, weekAdj]) => {
+      Object.entries(weekAdj).forEach(([slug, amt]) => {
+        const name = slugToName[slug];
+        if (!name || !perMember[name]) return;
+        perMember[name].adjustments = (perMember[name].adjustments || 0) + amt;
+        totalAdjustments += amt;
+      });
+    });
+
     const potRemaining =
-      totalBuyIns - totalWeeklyWinsPaid + totalWeeklyLossesOwed - totalLockWinsPaid + totalLockLossesOwed - totalUnderdogWinsPaid;
+      totalBuyIns - totalWeeklyWinsPaid + totalWeeklyLossesOwed - totalLockWinsPaid + totalLockLossesOwed - totalUnderdogWinsPaid - totalAdjustments;
 
     setMoneyData({
       perMember,
@@ -1852,6 +1881,8 @@ export default function App() {
             resetAllData={resetAllData}
             deleteWeek={deleteWeek}
             deleteMember={deleteMember}
+            addMember={addMember}
+            saveWeeklyAdjustments={saveWeeklyAdjustments}
           />
         )}
       </div>
@@ -2101,20 +2132,9 @@ function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
           </div>
         )}
 
-        {!showNew && (
-          <SecondaryButton full onClick={() => setShowNew(true)}>
-            <span className="flex items-center justify-center gap-1.5"><Plus size={14} /> I'm new here</span>
-          </SecondaryButton>
-        )}
-
-        {showNew && (
-          <div className="space-y-2 mt-2">
-            <FieldInput value={newName} onChange={setNewName} placeholder="Your name" />
-            <PrimaryButton full disabled={!newName.trim()} onClick={() => onJoinNew(newName)}>
-              Join the pool
-            </PrimaryButton>
-          </div>
-        )}
+        <div className="text-center cfb-mono text-xs mt-4" style={{ color: COLORS.muted }}>
+          Not listed? Ask your commissioner to add you.
+        </div>
       </div>
     </div>
   );
@@ -3237,6 +3257,8 @@ function CommishTab({
   resetAllData,
   deleteWeek,
   deleteMember,
+  addMember,
+  saveWeeklyAdjustments,
 }) {
   const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults | money
   const [editingWeek, setEditingWeek] = useState(null);
@@ -3295,6 +3317,9 @@ function CommishTab({
         </SecondaryButton>
         <SecondaryButton onClick={() => setMode("members")} disabled={mode === "members"}>
           Members
+        </SecondaryButton>
+        <SecondaryButton onClick={() => setMode("adjustments")} disabled={mode === "adjustments"}>
+          Adjustments
         </SecondaryButton>
       </div>
 
@@ -3382,7 +3407,11 @@ function CommishTab({
       )}
 
       {mode === "members" && (
-        <MembersManager leagueMeta={leagueMeta} deleteMember={deleteMember} />
+        <MembersManager leagueMeta={leagueMeta} deleteMember={deleteMember} addMember={addMember} />
+      )}
+
+      {mode === "adjustments" && (
+        <AdjustmentsManager leagueMeta={leagueMeta} saveWeeklyAdjustments={saveWeeklyAdjustments} />
       )}
 
       <div className="mt-6 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
@@ -6936,53 +6965,172 @@ function HistoryMoney({ data }) {
   );
 }
 
-function MembersManager({ leagueMeta, deleteMember }) {
-  const [confirmDelete, setConfirmDelete] = useState(null); // member name pending delete
+function AdjustmentsManager({ leagueMeta, saveWeeklyAdjustments }) {
+  const weeks = (leagueMeta.weeks || []).slice().sort((a, b) => b - a);
+  const [selectedWeek, setSelectedWeek] = useState(weeks[0] ?? null);
+  const [inputs, setInputs] = useState({});  // slug → string
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  // Load existing adjustments for the selected week
+  useEffect(() => {
+    if (selectedWeek == null) return;
+    const existing = leagueMeta.weeklyAdjustments?.[selectedWeek] || {};
+    const init = {};
+    leagueMeta.members.forEach((m) => {
+      const slug = slugify(m);
+      init[slug] = existing[slug] != null ? String(existing[slug]) : "";
+    });
+    setInputs(init);
+    setSaved(false);
+  }, [selectedWeek, leagueMeta.weeklyAdjustments]);
+
+  async function handleSave() {
+    if (selectedWeek == null) return;
+    setBusy(true);
+    const parsed = {};
+    Object.entries(inputs).forEach(([slug, val]) => {
+      const n = parseFloat(val);
+      if (!isNaN(n) && n !== 0) parsed[slug] = n;
+    });
+    const ok = await saveWeeklyAdjustments(selectedWeek, parsed);
+    setBusy(false);
+    if (ok) { setSaved(true); setTimeout(() => setSaved(false), 2500); }
+  }
+
+  if (weeks.length === 0) {
+    return <EmptyState title="No weeks yet" body="Create a week first, then you can add adjustments." />;
+  }
 
   return (
     <div className="space-y-4 cfb-fade-in">
       <div className="text-sm" style={{ color: COLORS.chalkDim }}>
-        Remove a member who isn't participating this season. Their picks stay stored in case you need them later.
+        Override the computed weekly payout for any member. Enter a dollar amount — positive adds money, negative subtracts. Leave blank for no adjustment.
+      </div>
+
+      {/* Week selector */}
+      <div className="flex flex-wrap gap-2">
+        {weeks.map((w) => (
+          <button
+            key={w}
+            onClick={() => setSelectedWeek(w)}
+            className="cfb-mono cfb-btn text-xs font-bold px-3 py-2"
+            style={{
+              background: selectedWeek === w ? COLORS.gold : "transparent",
+              color: selectedWeek === w ? COLORS.ink : COLORS.chalkDim,
+              border: `1px solid ${selectedWeek === w ? COLORS.gold : COLORS.lineStrong}`,
+            }}
+          >
+            Wk {w}
+          </button>
+        ))}
+      </div>
+
+      {selectedWeek != null && (
+        <div className="space-y-2">
+          {leagueMeta.members.map((name) => {
+            const slug = slugify(name);
+            const val = inputs[slug] ?? "";
+            return (
+              <div key={name} className="flex items-center gap-3 px-3 py-2.5"
+                style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldMid }}
+              >
+                <span className="text-sm font-semibold flex-1" style={{ color: COLORS.chalk }}>{name}</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="cfb-mono text-sm" style={{ color: COLORS.chalkDim }}>$</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={val}
+                    placeholder="0.00"
+                    onChange={(e) => setInputs((prev) => ({ ...prev, [slug]: e.target.value }))}
+                    style={{
+                      width: 90,
+                      background: COLORS.fieldDeep,
+                      border: `1px solid ${COLORS.lineStrong}`,
+                      color: parseFloat(val) > 0 ? COLORS.goldBright : parseFloat(val) < 0 ? COLORS.redBright : COLORS.chalk,
+                      padding: "6px 8px",
+                      borderRadius: 3,
+                      fontSize: "0.85rem",
+                      fontFamily: "var(--font-mono)",
+                      textAlign: "right",
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+          <PrimaryButton full onClick={handleSave} disabled={busy}>
+            {busy ? "Saving…" : saved ? "✓ Saved" : "Save adjustments"}
+          </PrimaryButton>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MembersManager({ leagueMeta, deleteMember, addMember }) {
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [addErr, setAddErr] = useState(null);
+
+  async function handleAdd() {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    if (leagueMeta.members.some((m) => m.toLowerCase() === trimmed.toLowerCase())) {
+      setAddErr("Already in the pool.");
+      return;
+    }
+    setBusy(true);
+    await addMember(trimmed);
+    setNewName("");
+    setAddErr(null);
+    setBusy(false);
+  }
+
+  return (
+    <div className="space-y-4 cfb-fade-in">
+      {/* Add member */}
+      <div className="space-y-2">
+        <div className="cfb-mono text-xs uppercase tracking-wider" style={{ color: COLORS.chalkDim }}>Add member</div>
+        <div className="flex gap-2">
+          <FieldInput value={newName} onChange={(v) => { setNewName(v); setAddErr(null); }} placeholder="Full name" />
+          <PrimaryButton disabled={!newName.trim() || busy} onClick={handleAdd}>
+            <Plus size={14} />
+          </PrimaryButton>
+        </div>
+        {addErr && <div className="text-xs" style={{ color: COLORS.redBright }}>{addErr}</div>}
+      </div>
+
+      <div style={{ height: 1, background: COLORS.line }} />
+
+      {/* Existing members */}
+      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
+        Remove a member who isn't participating this season.
       </div>
       <div className="space-y-2">
         {leagueMeta.members.map((m) => (
-          <div
-            key={m}
-            className="flex items-center justify-between px-3 py-2.5"
+          <div key={m} className="flex items-center justify-between px-3 py-2.5"
             style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldMid }}
           >
             <span className="text-sm font-semibold" style={{ color: COLORS.chalk }}>{m}</span>
             {confirmDelete === m ? (
               <div className="flex items-center gap-2">
                 <span className="cfb-mono text-xs" style={{ color: COLORS.redBright }}>Remove {m.split(" ")[0]}?</span>
-                <button
-                  disabled={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    await deleteMember(m);
-                    setConfirmDelete(null);
-                    setBusy(false);
-                  }}
+                <button disabled={busy} onClick={async () => { setBusy(true); await deleteMember(m); setConfirmDelete(null); setBusy(false); }}
                   className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-1.5"
-                  style={{ background: "rgba(179,55,42,0.22)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}
-                >
+                  style={{ background: "rgba(179,55,42,0.22)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}>
                   {busy ? "…" : "yes, remove"}
                 </button>
-                <button
-                  onClick={() => setConfirmDelete(null)}
+                <button onClick={() => setConfirmDelete(null)}
                   className="cfb-mono cfb-btn text-xs px-2.5 py-1.5"
-                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}
-                >
-                  cancel
-                </button>
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}>cancel</button>
               </div>
             ) : (
-              <button
-                onClick={() => setConfirmDelete(m)}
+              <button onClick={() => setConfirmDelete(m)}
                 className="cfb-mono cfb-btn text-xs px-2.5 py-1.5 flex items-center gap-1.5"
-                style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
-              >
+                style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>
                 <Trash2 size={12} /> remove
               </button>
             )}
