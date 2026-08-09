@@ -2269,6 +2269,10 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone" | "standings"
   const [autoLockTick, setAutoLockTick] = useState(0); // incremented to force re-render at kickoff
 
+  // Live score state — must be declared here, before any early returns (rules of hooks)
+  const [liveScores, setLiveScores] = useState({});
+  const liveTimerRef = useRef(null);
+
   useEffect(() => {
     setViewMode("mine");
   }, [selectedWeek]);
@@ -2312,8 +2316,6 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   const autoLockedGameIds = computeAutoLockStatus(week.games);
 
   // Live score polling — fires immediately when games lock, then every 30s.
-  const [liveScores, setLiveScores] = useState({});
-  const liveTimerRef = useRef(null);
   const lockedCount = autoLockedGameIds.size;
 
   useEffect(() => {
