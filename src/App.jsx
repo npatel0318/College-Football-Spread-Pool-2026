@@ -846,6 +846,7 @@ export default function App() {
       games,
       locked,
       showPicksEarly: existing?.showPicksEarly || false,
+      hidePicksUntilKickoff: existing?.hidePicksUntilKickoff || false,
       graded: existing?.graded && existing.games.length === games.length ? existing.graded : false,
       weekDates: weekDates || existing?.weekDates || null,
     };
@@ -938,6 +939,14 @@ export default function App() {
     const week = weekCache[weekNum];
     if (!week) return;
     const payload = { ...week, locked: !week.locked };
+    const r = await storage.set(`week:${weekNum}:games`, JSON.stringify(payload), true).catch(() => null);
+    if (r) setWeekCache((prev) => ({ ...prev, [weekNum]: payload }));
+  }
+
+  async function toggleHidePicksUntilKickoff(weekNum) {
+    const week = weekCache[weekNum];
+    if (!week) return;
+    const payload = { ...week, hidePicksUntilKickoff: !week.hidePicksUntilKickoff };
     const r = await storage.set(`week:${weekNum}:games`, JSON.stringify(payload), true).catch(() => null);
     if (r) setWeekCache((prev) => ({ ...prev, [weekNum]: payload }));
   }
@@ -1968,6 +1977,7 @@ export default function App() {
             saveWeekGames={saveWeekGames}
             toggleLock={toggleLock}
             toggleShowPicksEarly={toggleShowPicksEarly}
+            toggleHidePicksUntilKickoff={toggleHidePicksUntilKickoff}
             saveResults={saveResults}
             autoGradeWeek={autoGradeWeek}
             winTotalsCache={winTotalsCache}
@@ -2471,9 +2481,9 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
       {!week.locked && (
         <div className="text-sm" style={{ color: COLORS.chalkDim }}>
           {submittedCount} of {leagueMeta.members.length} have submitted picks.{" "}
-          {week.showPicksEarly
-            ? "The commissioner has made picks visible to everyone this week, even before lock."
-            : "Games lock automatically at the first kickoff of each day — Friday games lock Friday, Saturday games lock Saturday."}
+          {week.hidePicksUntilKickoff
+            ? "Picks are hidden — they'll reveal game by game as each kickoff passes."
+            : "Picks are visible to everyone."}
         </div>
       )}
 
@@ -2498,15 +2508,15 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
         ))}
       </div>
 
-      {viewMode === "everyone" && !week.locked && !week.showPicksEarly && (
-        <EmptyState
-          title="Picks are still hidden"
-          body="Everyone's picks stay private until the commissioner locks the week — check back after that."
+      {viewMode === "everyone" && (
+        <PicksGrid
+          leagueMeta={leagueMeta}
+          week={week}
+          picksCache={picksCache[selectedWeek] || {}}
+          slugToName={slugToName}
+          hideUntilKickoff={!!week.hidePicksUntilKickoff}
+          autoLockedGameIds={autoLockedGameIds}
         />
-      )}
-
-      {viewMode === "everyone" && (week.locked || week.showPicksEarly) && (
-        <PicksGrid leagueMeta={leagueMeta} week={week} picksCache={picksCache[selectedWeek] || {}} slugToName={slugToName} />
       )}
 
       {viewMode === "standings" && (
@@ -3147,13 +3157,18 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
   );
 }
 
-function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
+function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff, autoLockedGameIds }) {
   const members = leagueMeta.members;
   return (
     <div className="mt-2">
       <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.chalkDim }}>
         Everyone's picks
       </div>
+      {hideUntilKickoff && !week.locked && (
+        <div className="cfb-mono text-xs mb-2" style={{ color: COLORS.muted }}>
+          🔒 = picks hidden until that game kicks off
+        </div>
+      )}
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
         <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse" }}>
           <thead>
@@ -3171,6 +3186,11 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
           <tbody>
             {week.games.map((g, idx) => {
               const cover = coveringSide(g);
+              // A game's picks are revealed when:
+              // - hide mode is off (default), OR
+              // - game has kicked off (in autoLockedGameIds), OR
+              // - the week is fully graded
+              const revealed = !hideUntilKickoff || autoLockedGameIds?.has(g.id) || week.graded;
               return (
                 <tr key={g.id} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
@@ -3180,10 +3200,16 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                     )}
                   </td>
                   {members.map((m) => {
+                    if (!revealed) {
+                      return (
+                        <td key={m} className="px-2 py-1.5 text-center" style={{ color: COLORS.muted }}>
+                          🔒
+                        </td>
+                      );
+                    }
                     const slug = slugify(m);
                     const pick = picksCache[slug]?.picks?.[g.id];
                     const isLock = picksCache[slug]?.lockedGameId === g.id;
-                    const pickedSide = pick; // "home" or "away"
                     const label = pick ? (pick === "home" ? g.home : g.away) : "—";
                     const logo = pick ? (pick === "home" ? g.homeLogo : g.awayLogo) : "";
                     const teamColor = pick ? (pick === "home" ? g.homeColor : g.awayColor) : "";
@@ -3196,17 +3222,9 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                       <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
                         <span className="inline-flex items-center gap-1">
                           {logo ? (
-                            <img
-                              src={logo}
-                              alt={label}
-                              style={{ width: 18, height: 18, objectFit: "contain", flexShrink: 0 }}
-                              onError={(e) => { e.target.style.display = "none"; }}
-                            />
+                            <img src={logo} alt={label} style={{ width: 18, height: 18, objectFit: "contain", flexShrink: 0 }} onError={(e) => { e.target.style.display = "none"; }} />
                           ) : pick && teamColor ? (
-                            <span style={{
-                              display: "inline-block", width: 10, height: 10, borderRadius: "50%",
-                              background: teamColor, flexShrink: 0,
-                            }} />
+                            <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: teamColor, flexShrink: 0 }} />
                           ) : null}
                           {label.split(" ")[0]}
                           {isLock && <Flame size={11} style={{ color: COLORS.gold, flexShrink: 0 }} />}
@@ -3224,6 +3242,9 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName }) {
                 </span>
               </td>
               {members.map((m) => {
+                if (hideUntilKickoff && !week.locked && !week.graded) {
+                  return <td key={m} className="px-2 py-1.5 text-center" style={{ color: COLORS.muted }}>🔒</td>;
+                }
                 const slug = slugify(m);
                 const pick = picksCache[slug]?.underdogPick;
                 const result = picksCache[slug]?.underdogResult;
@@ -3327,6 +3348,7 @@ function CommishTab({
   saveWeekGames,
   toggleLock,
   toggleShowPicksEarly,
+  toggleHidePicksUntilKickoff,
   saveResults,
   autoGradeWeek,
   winTotalsCache,
@@ -3430,6 +3452,7 @@ function CommishTab({
           saveWeekGames={saveWeekGames}
           toggleLock={toggleLock}
           toggleShowPicksEarly={toggleShowPicksEarly}
+          toggleHidePicksUntilKickoff={toggleHidePicksUntilKickoff}
           deleteWeek={deleteWeek}
         />
       )}
@@ -3754,7 +3777,7 @@ function emptyGame() {
   };
 }
 
-function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly, deleteWeek }) {
+function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly, toggleHidePicksUntilKickoff, deleteWeek }) {
   const nextWeekNum = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) + 1 : 1;
   const [selectedWeek, setSelectedWeek] = useState(null); // null = new week
   const [games, setGames] = useState(Array.from({ length: 10 }, emptyGame));
@@ -4262,16 +4285,18 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
             {currentWeekData.locked ? "locked — click to open" : "open — click to lock"}
           </button>
           <button
-            onClick={() => toggleShowPicksEarly(selectedWeek)}
+            onClick={() => toggleHidePicksUntilKickoff(selectedWeek)}
             className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2 flex items-center gap-1"
             style={{
-              background: currentWeekData.showPicksEarly ? "rgba(217,164,65,0.16)" : "transparent",
-              border: `1px solid ${currentWeekData.showPicksEarly ? COLORS.gold : COLORS.lineStrong}`,
-              color: currentWeekData.showPicksEarly ? COLORS.goldBright : COLORS.chalkDim,
+              background: currentWeekData.hidePicksUntilKickoff ? "rgba(217,164,65,0.16)" : "transparent",
+              border: `1px solid ${currentWeekData.hidePicksUntilKickoff ? COLORS.gold : COLORS.lineStrong}`,
+              color: currentWeekData.hidePicksUntilKickoff ? COLORS.goldBright : COLORS.chalkDim,
             }}
           >
             <Eye size={12} />
-            {currentWeekData.showPicksEarly ? "picks visible early — click to hide until lock" : "picks hidden until lock — click to show early"}
+            {currentWeekData.hidePicksUntilKickoff
+              ? "picks hidden until kickoff — click to make visible"
+              : "picks visible — click to hide until kickoff"}
           </button>
         </div>
       )}
