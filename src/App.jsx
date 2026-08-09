@@ -3219,8 +3219,8 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
             {week.games.map((g, idx) => {
               const cover = coveringSide(g);
               const revealed = !hideUntilKickoff || autoLockedGameIds?.has(g.id) || week.graded;
-              const awayAbbr = teamAbbrev(g.away);
-              const homeAbbr = teamAbbrev(g.home);
+              const awayAbbr = g.awayAbbr || teamAbbrev(g.away);
+              const homeAbbr = g.homeAbbr || teamAbbrev(g.home);
               const favAbbr  = g.favorite === "home" ? homeAbbr : awayAbbr;
 
               return (
@@ -3818,6 +3818,7 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
               logo: team.logo || "",
               color: team.color ? `#${team.color}` : "",
               altColor: team.alternateColor ? `#${team.alternateColor}` : "",
+              abbreviation: team.abbreviation || "",
               rank,
               conference: confShort,
             };
@@ -4116,6 +4117,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           awayRank: awayTeam.rank || null,
           homeRank: homeTeam.rank || null,
           neutral: neutralGames.has(neutralKey),
+          homeAbbr: homeTeam.abbreviation || teamAbbrev(g.home),
+          awayAbbr: awayTeam.abbreviation || teamAbbrev(g.away),
         };
       });
 
