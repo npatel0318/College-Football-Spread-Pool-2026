@@ -429,6 +429,30 @@ function FieldInput({ value, onChange, placeholder, type = "text", style, disabl
   );
 }
 
+const TOKEN_KEY = "cfbpool:my-token"; // localStorage key for stored member token
+
+// ---------- token utilities ----------
+function generateToken() {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  try {
+    return Array.from(crypto.getRandomValues(new Uint8Array(8)))
+      .map((b) => chars[b % chars.length])
+      .join("");
+  } catch {
+    return Math.random().toString(36).slice(2, 10);
+  }
+}
+function readInviteFromHash() {
+  const h = window.location.hash;
+  return h.startsWith("#join/") ? h.slice(6) : null;
+}
+function clearInviteHash() {
+  try { history.replaceState(null, "", window.location.pathname + window.location.search); } catch {}
+}
+function inviteUrl(token) {
+  return `${window.location.origin}${window.location.pathname}#join/${token}`;
+}
+
 // ---------- bootstrap helpers ----------
 // We cache a snapshot of leagueMeta + myName in localStorage so that every
 // session starts instantly, even on iOS Safari where the first cold Firestore
@@ -444,7 +468,13 @@ function readBootstrap() {
     if (!raw || !name) return null;
     const meta = JSON.parse(raw);
     if (!meta?.members?.includes(name)) return null;
-    return { meta, name };
+    // If the pool hasn't had tokens generated yet (pre-invite-link deploy),
+    // skip the token check — the init effect will issue a token via grace period.
+    if (!meta.memberTokens) return { meta, name };
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return null;
+    if (meta.memberTokens[slugify(name)] !== token) return null;
+    return { meta, name, token };
   } catch {
     return null;
   }
@@ -523,31 +553,81 @@ export default function App() {
   /* ---------- initial load ---------- */
   useEffect(() => {
     (async () => {
+      const inviteToken = readInviteFromHash(); // read before any async work
       const metaRaw = await safeGet("league-meta", true);
-      const nameRaw = await safeGet("my-name", false);
-      if (metaRaw) {
-        const meta = JSON.parse(metaRaw);
-        // Always save fresh data to bootstrap cache so next session is instant
-        saveBootstrap(meta);
-        setLeagueMeta(meta); saveBootstrap(meta);
-        if (nameRaw && meta.members.includes(nameRaw)) {
-          setMyName(nameRaw);
-          setPhase("app");
-          setSelectedWeek(meta.weeks.length ? Math.max(...meta.weeks) : null);
-          const wtYears = meta.winTotalsYears || [];
-          setSelectedWinTotalsYear(wtYears.length ? Math.max(...wtYears) : null);
-          const pYears = meta.playoffYears || [];
-          setSelectedPlayoffYear(pYears.length ? Math.max(...pYears) : null);
-        } else if (!boot) {
-          // No bootstrap and not a member → go to identify
-          setPhase("identify");
-        }
-      } else if (!boot) {
-        // No Firestore data and no bootstrap → fresh install
-        setPhase("setup");
+      if (!metaRaw) {
+        if (!boot) setPhase("setup");
+        return; // stay on "app" with cached bootstrap if Firestore timed out
       }
-      // If we had a bootstrap and Firestore timed out, we stay in "app" with
-      // cached data — better than a white screen.
+
+      let meta = JSON.parse(metaRaw);
+
+      // Ensure every member has a token — generate any that are missing.
+      // This runs silently on first deployment (migration) and when new members are added.
+      const tokens = { ...(meta.memberTokens || {}) };
+      let tokensChanged = false;
+      meta.members.forEach((m) => {
+        const s = slugify(m);
+        if (!tokens[s]) { tokens[s] = generateToken(); tokensChanged = true; }
+      });
+      if (tokensChanged) {
+        meta = { ...meta, memberTokens: tokens };
+        await storage.set("league-meta", JSON.stringify(meta), true).catch(() => null);
+      }
+      saveBootstrap(meta);
+      setLeagueMeta(meta);
+
+      // Helper: transition to "app" phase after a successful auth
+      function goToApp(name) {
+        setMyName(name);
+        setPhase("app");
+        setSelectedWeek(meta.weeks?.length ? Math.max(...meta.weeks) : null);
+        const wtYears = meta.winTotalsYears || [];
+        setSelectedWinTotalsYear(wtYears.length ? Math.max(...wtYears) : null);
+        const pYears = meta.playoffYears || [];
+        setSelectedPlayoffYear(pYears.length ? Math.max(...pYears) : null);
+        saveBootstrap(meta);
+      }
+
+      // 1. INVITE LINK: if a #join/TOKEN hash is present, authenticate from it
+      if (inviteToken) {
+        const slug = Object.keys(tokens).find((s) => tokens[s] === inviteToken);
+        const name = slug ? meta.members.find((m) => slugify(m) === slug) : null;
+        if (name) {
+          clearInviteHash();
+          await storage.set("my-name", name, false).catch(() => null);
+          localStorage.setItem(TOKEN_KEY, inviteToken);
+          goToApp(name);
+          return;
+        }
+        // Token not recognised (expired / regenerated) — fall through to identify
+      }
+
+      // 2. STORED SESSION: verify name + token still match
+      const nameRaw = await safeGet("my-name", false);
+      if (nameRaw && meta.members.includes(nameRaw)) {
+        const expectedToken = tokens[slugify(nameRaw)];
+        const storedToken = localStorage.getItem(TOKEN_KEY);
+
+        if (storedToken && storedToken === expectedToken) {
+          // Valid token on file — proceed
+          goToApp(nameRaw);
+          return;
+        }
+
+        if (!storedToken && expectedToken) {
+          // GRACE PERIOD: member was authenticated before tokens existed.
+          // Auto-grant their token once so existing sessions aren't disrupted.
+          localStorage.setItem(TOKEN_KEY, expectedToken);
+          goToApp(nameRaw);
+          return;
+        }
+
+        // Token mismatch (link was regenerated) — require fresh invite link
+      }
+
+      // 3. NO VALID SESSION
+      if (!boot) setPhase("identify");
     })();
   }, []);
 
@@ -560,9 +640,11 @@ export default function App() {
   /* ---------- league setup / identity ---------- */
 
   async function createLeague(leagueName, yourName, passcode) {
+    const slug = slugify(yourName.trim());
     const meta = {
       leagueName: leagueName.trim(),
       members: [yourName.trim()],
+      memberTokens: { [slug]: generateToken() },
       commissionerPasscode: passcode,
       weeks: [],
       winTotalsYears: [],
@@ -585,7 +667,9 @@ export default function App() {
   }
 
   async function joinExisting(name) {
+    const token = leagueMeta?.memberTokens?.[slugify(name)];
     await storage.set("my-name", name, false).catch(() => null);
+    if (token) localStorage.setItem(TOKEN_KEY, token);
     setMyName(name);
     setPhase("app");
     setSelectedWeek(leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) : null);
@@ -593,7 +677,6 @@ export default function App() {
     setSelectedWinTotalsYear(wtYears.length ? Math.max(...wtYears) : null);
     const pYears = leagueMeta.playoffYears || [];
     setSelectedPlayoffYear(pYears.length ? Math.max(...pYears) : null);
-    // Save bootstrap so subsequent reloads in this Private session are instant too
     saveBootstrap(leagueMeta);
   }
 
@@ -796,7 +879,14 @@ export default function App() {
   }
 
   async function addMember(name) {
-    const updated = { ...leagueMeta, members: [...leagueMeta.members, name] };
+    const slug = slugify(name);
+    const existingTokens = leagueMeta.memberTokens || {};
+    const token = existingTokens[slug] || generateToken();
+    const updated = {
+      ...leagueMeta,
+      members: [...leagueMeta.members, name],
+      memberTokens: { ...existingTokens, [slug]: token },
+    };
     const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
     if (r) { setLeagueMeta(updated); saveBootstrap(updated); }
   }
@@ -809,6 +899,18 @@ export default function App() {
     const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
     if (r) { setLeagueMeta(updated); saveBootstrap(updated); }
     return !!r;
+  }
+
+  async function regenerateMemberToken(name) {
+    const slug = slugify(name);
+    const newToken = generateToken();
+    const updated = {
+      ...leagueMeta,
+      memberTokens: { ...(leagueMeta.memberTokens || {}), [slug]: newToken },
+    };
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (r) { setLeagueMeta(updated); saveBootstrap(updated); }
+    return r ? newToken : null;
   }
 
   async function deleteMember(name) {
@@ -1693,13 +1795,7 @@ export default function App() {
     return (
       <div className="cfb-root" style={rootStyle}>
         <style>{FONT_CSS}</style>
-        <IdentifyScreen
-          leagueName={leagueMeta.leagueName}
-          members={leagueMeta.members}
-          onPick={joinExisting}
-          onJoinNew={joinNew}
-          error={error}
-        />
+        <IdentifyScreen leagueName={leagueMeta.leagueName} />
       </div>
     );
   }
@@ -1882,6 +1978,7 @@ export default function App() {
             deleteWeek={deleteWeek}
             deleteMember={deleteMember}
             addMember={addMember}
+            regenerateMemberToken={regenerateMemberToken}
             saveWeeklyAdjustments={saveWeeklyAdjustments}
           />
         )}
@@ -2100,40 +2197,22 @@ function SetupScreen({ onCreate, error }) {
 
 /* ---------------------------- identify screen ------------------------------ */
 
-function IdentifyScreen({ leagueName, members, onPick, onJoinNew, error }) {
-  const [newName, setNewName] = useState("");
-  const [showNew, setShowNew] = useState(members.length === 0);
-
+function IdentifyScreen({ leagueName }) {
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-sm cfb-fade-in">
-        <div className="text-center mb-6">
-          <div className="cfb-mono text-xs uppercase tracking-widest" style={{ color: COLORS.gold }}>
-            {leagueName}
-          </div>
-          <div className="cfb-display text-3xl uppercase mt-1">Who's Picking?</div>
+      <div className="w-full max-w-sm cfb-fade-in text-center space-y-5">
+        <div className="cfb-mono text-xs uppercase tracking-widest" style={{ color: COLORS.gold }}>
+          {leagueName}
         </div>
-
-        {error && <div className="mb-4"><Banner>{error}</Banner></div>}
-
-        {members.length > 0 && (
-          <div className="space-y-2 mb-4">
-            {members.map((m) => (
-              <button
-                key={m}
-                onClick={() => onPick(m)}
-                className="cfb-btn w-full flex items-center justify-between px-4 py-3 text-sm font-semibold"
-                style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalk }}
-              >
-                {m}
-                <ChevronRight size={16} style={{ color: COLORS.gold }} />
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div className="text-center cfb-mono text-xs mt-4" style={{ color: COLORS.muted }}>
-          Not listed? Ask your commissioner to add you.
+        <div className="cfb-display text-3xl uppercase">Join the Pool</div>
+        <div className="text-sm leading-relaxed" style={{ color: COLORS.chalkDim }}>
+          You need your personal invite link to access the pool. Check your messages for a link from the commissioner.
+        </div>
+        <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+          Already have your link? Open it on this device and you'll be let in automatically.
+        </div>
+        <div className="cfb-mono text-xs" style={{ color: COLORS.muted, marginTop: 16 }}>
+          If your link stopped working, ask the commissioner to send you a new one.
         </div>
       </div>
     </div>
@@ -3258,6 +3337,7 @@ function CommishTab({
   deleteWeek,
   deleteMember,
   addMember,
+  regenerateMemberToken,
   saveWeeklyAdjustments,
 }) {
   const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults | money
@@ -3407,7 +3487,7 @@ function CommishTab({
       )}
 
       {mode === "members" && (
-        <MembersManager leagueMeta={leagueMeta} deleteMember={deleteMember} addMember={addMember} />
+        <MembersManager leagueMeta={leagueMeta} deleteMember={deleteMember} addMember={addMember} regenerateMemberToken={regenerateMemberToken} />
       )}
 
       {mode === "adjustments" && (
@@ -7069,11 +7149,13 @@ function AdjustmentsManager({ leagueMeta, saveWeeklyAdjustments }) {
   );
 }
 
-function MembersManager({ leagueMeta, deleteMember, addMember }) {
+function MembersManager({ leagueMeta, deleteMember, addMember, regenerateMemberToken }) {
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmRegen, setConfirmRegen] = useState(null);
   const [busy, setBusy] = useState(false);
   const [newName, setNewName] = useState("");
   const [addErr, setAddErr] = useState(null);
+  const [copiedSlug, setCopiedSlug] = useState(null);
 
   async function handleAdd() {
     const trimmed = newName.trim();
@@ -7087,6 +7169,16 @@ function MembersManager({ leagueMeta, deleteMember, addMember }) {
     setNewName("");
     setAddErr(null);
     setBusy(false);
+  }
+
+  function copyLink(name) {
+    const slug = slugify(name);
+    const token = leagueMeta.memberTokens?.[slug];
+    if (!token) return;
+    const url = inviteUrl(token);
+    navigator.clipboard?.writeText(url).catch(() => {});
+    setCopiedSlug(slug);
+    setTimeout(() => setCopiedSlug(null), 2000);
   }
 
   return (
@@ -7105,37 +7197,90 @@ function MembersManager({ leagueMeta, deleteMember, addMember }) {
 
       <div style={{ height: 1, background: COLORS.line }} />
 
-      {/* Existing members */}
-      <div className="text-sm" style={{ color: COLORS.chalkDim }}>
-        Remove a member who isn't participating this season.
+      {/* Member list with invite links */}
+      <div className="cfb-mono text-xs uppercase tracking-wider" style={{ color: COLORS.chalkDim }}>Invite links</div>
+      <div className="text-xs" style={{ color: COLORS.muted }}>
+        Each member gets a unique link. They tap it once on their device and they're in — no login needed after that. If you regenerate someone's link their old one stops working.
       </div>
       <div className="space-y-2">
-        {leagueMeta.members.map((m) => (
-          <div key={m} className="flex items-center justify-between px-3 py-2.5"
-            style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldMid }}
-          >
-            <span className="text-sm font-semibold" style={{ color: COLORS.chalk }}>{m}</span>
-            {confirmDelete === m ? (
-              <div className="flex items-center gap-2">
-                <span className="cfb-mono text-xs" style={{ color: COLORS.redBright }}>Remove {m.split(" ")[0]}?</span>
-                <button disabled={busy} onClick={async () => { setBusy(true); await deleteMember(m); setConfirmDelete(null); setBusy(false); }}
-                  className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-1.5"
-                  style={{ background: "rgba(179,55,42,0.22)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}>
-                  {busy ? "…" : "yes, remove"}
-                </button>
-                <button onClick={() => setConfirmDelete(null)}
-                  className="cfb-mono cfb-btn text-xs px-2.5 py-1.5"
-                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}>cancel</button>
+        {leagueMeta.members.map((m) => {
+          const slug = slugify(m);
+          const token = leagueMeta.memberTokens?.[slug];
+          const copied = copiedSlug === slug;
+          return (
+            <div key={m} style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldMid }}>
+              <div className="flex items-center justify-between px-3 py-2.5">
+                <span className="text-sm font-semibold" style={{ color: COLORS.chalk }}>{m}</span>
+                <div className="flex items-center gap-2">
+                  {/* Copy link */}
+                  <button
+                    onClick={() => copyLink(m)}
+                    disabled={!token}
+                    className="cfb-mono cfb-btn text-xs px-2.5 py-1.5 flex items-center gap-1.5"
+                    style={{ border: `1px solid ${copied ? COLORS.gold : COLORS.lineStrong}`, color: copied ? COLORS.goldBright : COLORS.chalkDim }}
+                  >
+                    {copied ? "✓ copied" : "copy link"}
+                  </button>
+                  {/* Regenerate */}
+                  {confirmRegen === m ? (
+                    <>
+                      <button
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          await regenerateMemberToken(m);
+                          setConfirmRegen(null);
+                          setBusy(false);
+                        }}
+                        className="cfb-mono cfb-btn text-xs px-2 py-1.5"
+                        style={{ background: "rgba(179,55,42,0.2)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}
+                      >
+                        {busy ? "…" : "confirm"}
+                      </button>
+                      <button onClick={() => setConfirmRegen(null)}
+                        className="cfb-mono cfb-btn text-xs px-2 py-1.5"
+                        style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>
+                        cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmRegen(m)}
+                      className="cfb-mono cfb-btn text-xs px-2 py-1.5"
+                      style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
+                      title="Regenerate invite link (invalidates old link)">
+                      ↻
+                    </button>
+                  )}
+                  {/* Remove */}
+                  {confirmDelete === m ? (
+                    <>
+                      <button disabled={busy} onClick={async () => { setBusy(true); await deleteMember(m); setConfirmDelete(null); setBusy(false); }}
+                        className="cfb-mono cfb-btn text-xs px-2 py-1.5 font-bold"
+                        style={{ background: "rgba(179,55,42,0.2)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}>
+                        {busy ? "…" : "remove"}
+                      </button>
+                      <button onClick={() => setConfirmDelete(null)}
+                        className="cfb-mono cfb-btn text-xs px-2 py-1.5"
+                        style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>cancel</button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmDelete(m)}
+                      className="cfb-mono cfb-btn text-xs px-2 py-1.5"
+                      style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
               </div>
-            ) : (
-              <button onClick={() => setConfirmDelete(m)}
-                className="cfb-mono cfb-btn text-xs px-2.5 py-1.5 flex items-center gap-1.5"
-                style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>
-                <Trash2 size={12} /> remove
-              </button>
-            )}
-          </div>
-        ))}
+              {/* Invite URL preview */}
+              {token && (
+                <div className="px-3 pb-2.5 cfb-mono text-xs truncate" style={{ color: COLORS.muted }}>
+                  {inviteUrl(token)}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
