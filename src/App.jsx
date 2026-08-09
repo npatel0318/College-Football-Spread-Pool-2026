@@ -2266,10 +2266,10 @@ function LiveScorePanel({ game, data }) {
 }
 
 function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myName, savePick, savingGameId, slugToName, toggleMyLock, saveUnderdogPick, lastAutoCheckTime }) {
-  const [viewMode, setViewMode] = useState("mine"); // "mine" | "everyone" | "standings"
-  const [autoLockTick, setAutoLockTick] = useState(0); // incremented to force re-render at kickoff
+  const [viewMode, setViewMode] = useState("mine");
+  const [autoLockTick, setAutoLockTick] = useState(0);
 
-  // Live score state — must be declared here, before any early returns (rules of hooks)
+  // Live score state — declared before any early returns (rules of hooks)
   const [liveScores, setLiveScores] = useState({});
   const liveTimerRef = useRef(null);
 
@@ -2277,8 +2277,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
     setViewMode("mine");
   }, [selectedWeek]);
 
-  // Timer that fires precisely when the next game day's first kickoff passes,
-  // incrementing autoLockTick so autoLockedGameIds recomputes.
+  // Timer that fires precisely when the next game day's first kickoff passes
   useEffect(() => {
     if (!week?.games?.length) return;
     const ms = msUntilNextKickoff(week.games);
@@ -2286,6 +2285,27 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
     const id = setTimeout(() => setAutoLockTick((t) => t + 1), ms + 1500);
     return () => clearTimeout(id);
   }, [week?.games, autoLockTick]);
+
+  // Compute locked games even before early-returns so the useEffect below
+  // is always called unconditionally (rules of hooks)
+  const autoLockedGameIds = computeAutoLockStatus(week?.games || []);
+  const lockedCount = autoLockedGameIds.size;
+
+  // Live score polling — starts when games lock, refreshes every 30 s
+  useEffect(() => {
+    if (liveTimerRef.current) clearInterval(liveTimerRef.current);
+    if (!week || lockedCount === 0 || week.graded) return;
+    let stale = false;
+    async function refresh() {
+      const data = await fetchLiveGameDetails(week).catch(() => null);
+      if (!stale && data) setLiveScores(data);
+    }
+    refresh();
+    liveTimerRef.current = setInterval(refresh, 30_000);
+    return () => { stale = true; clearInterval(liveTimerRef.current); };
+  }, [selectedWeek, lockedCount, week?.graded]); // eslint-disable-line
+
+  // --- early returns after all hooks ---
 
   if (selectedWeek == null) {
     return (
@@ -2303,33 +2323,6 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   if (!week) {
     return <EmptyState title={`Week ${selectedWeek} not found`} body="This week may have been removed." />;
   }
-
-  const mySlug = slugify(myName);
-  const myPicks = picksCache[selectedWeek]?.[mySlug]?.picks || {};
-  const myLockedGameId = picksCache[selectedWeek]?.[mySlug]?.lockedGameId || null;
-  const myUnderdogPick = picksCache[selectedWeek]?.[mySlug]?.underdogPick || null;
-  const myUnderdogResult = picksCache[selectedWeek]?.[mySlug]?.underdogResult ?? null;
-  const allEntries = Object.entries(picksCache[selectedWeek] || {});
-  const submittedCount = allEntries.filter(([, v]) => v && Object.keys(v.picks || {}).length > 0).length;
-
-  // Plain computation — safe after the early-return guards above.
-  const autoLockedGameIds = computeAutoLockStatus(week.games);
-
-  // Live score polling — fires immediately when games lock, then every 30s.
-  const lockedCount = autoLockedGameIds.size;
-
-  useEffect(() => {
-    if (liveTimerRef.current) clearInterval(liveTimerRef.current);
-    if (!week || lockedCount === 0 || week.graded) return;
-    let stale = false;
-    async function refresh() {
-      const data = await fetchLiveGameDetails(week).catch(() => null);
-      if (!stale && data) setLiveScores(data);
-    }
-    refresh();
-    liveTimerRef.current = setInterval(refresh, 30_000);
-    return () => { stale = true; clearInterval(liveTimerRef.current); };
-  }, [selectedWeek, lockedCount, week?.graded]); // eslint-disable-line
 
   const myCorrect = week.graded
     ? week.games.reduce((acc, g) => {
