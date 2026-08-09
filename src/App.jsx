@@ -2788,9 +2788,11 @@ function UnderdogOfWeekCard({ weekNum, locked, existingPick, existingResult, sav
 
 function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) {
   const members = leagueMeta.members;
+  const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
   const totalGames = week.games.length;
   const gamesWithScores = week.games.filter((g) => g.homeScore != null && g.awayScore != null);
   const completedCount = gamesWithScores.length;
+  const allDone = completedCount === totalGames;
 
   // Format how long ago the last check was
   const [checkAgoLabel, setCheckAgoLabel] = useState(null);
@@ -2807,17 +2809,21 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
     return () => clearInterval(id);
   }, [lastAutoCheckTime]);
 
-  // Push games are decided (scores are in) but count as neither win nor loss.
-  // Compute once at the game level so all members share the same push count.
+  // Push games are decided but count as neither win nor loss
   const pushGameCount = week.games.filter((g) => {
     if (g.homeScore == null || g.awayScore == null) return false;
     return coveringSide(g) === "push";
   }).length;
 
+  // Build per-member rows
   const rows = members.map((name) => {
     const slug = slugify(name);
     const memberPicks = picksCache[slug]?.picks || {};
     const lockedGameId = picksCache[slug]?.lockedGameId || null;
+    const underdogPick = picksCache[slug]?.underdogPick || null;
+    const underdogResult = picksCache[slug]?.underdogResult ?? null;
+    const submitted = Object.keys(memberPicks).length > 0;
+
     let wins = 0, losses = 0, lockResult = null;
 
     week.games.forEach((g) => {
@@ -2828,19 +2834,73 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
       if (pick === cover) wins++;
       else losses++;
       if (g.id === lockedGameId) {
-          if (cover === "push") lockResult = "push";
-          else lockResult = pick === cover ? "won" : "lost";
-        }
+        lockResult = cover === "push" ? "push" : pick === cover ? "won" : "lost";
+      }
     });
 
+    // Underdog money
+    let udAmount = 0;
+    if (underdogPick && underdogResult === true) {
+      const udGame = week.games.find((g) => {
+        const dog = g.favorite === "home" ? g.away : g.home;
+        return dog?.toLowerCase() === underdogPick.toLowerCase();
+      });
+      udAmount = underdogPayout(udGame?.spread || 0, settings);
+    }
+
     const pending = totalGames - wins - losses - pushGameCount;
-    return { name, wins, losses, pending, lockResult, submitted: Object.keys(memberPicks).length > 0 };
-  }).sort((a, b) => {
+    return { name, wins, losses, pending, lockResult, submitted, underdogResult, udAmount };
+  });
+
+  // Weekly winner/loser projection —————————————————————————————————————
+  // Only project once at least one game has scored
+  const winnerMoney = {}; // name → amount (positive)
+  const loserMoney  = {}; // name → amount (negative)
+
+  if (completedCount > 0) {
+    const active = rows.filter((r) => r.submitted);
+    if (active.length > 1) {
+      const maxWins = Math.max(...active.map((r) => r.wins));
+      const minWins = Math.min(...active.map((r) => r.wins));
+
+      if (maxWins > minWins) {
+        // Winners: all tied at most wins, split evenly
+        const winners = active.filter((r) => r.wins === maxWins);
+        const winShare = Math.round((settings.weeklyWinAmount / winners.length) * 100) / 100;
+        winners.forEach((r) => { winnerMoney[r.name] = winShare; });
+
+        // Losers: fewest wins; tie-break by most losses; split evenly
+        const maxLossesAtMin = Math.max(
+          ...active.filter((r) => r.wins === minWins).map((r) => r.losses)
+        );
+        const losers = active.filter(
+          (r) => r.wins === minWins && r.losses === maxLossesAtMin
+        );
+        const loseShare = Math.round((settings.weeklyLossAmount / losers.length) * 100) / 100;
+        losers.forEach((r) => { loserMoney[r.name] = -loseShare; });
+      }
+    }
+  }
+
+  // Sort: most wins first; ties broken by fewest losses
+  rows.sort((a, b) => {
     if (b.wins !== a.wins) return b.wins - a.wins;
     return a.losses - b.losses;
   });
 
   const noScoresYet = completedCount === 0;
+
+  // Money formatter: +$X or −$X (no sign for 0)
+  function moneyCell(amount, projected) {
+    if (amount === 0) return <span style={{ color: COLORS.muted }}>—</span>;
+    const pos = amount > 0;
+    return (
+      <span style={{ color: pos ? COLORS.goldBright : COLORS.redBright }}>
+        {pos ? "+" : "−"}${Math.abs(amount).toFixed(2).replace(/\.00$/, "")}
+        {projected && <span style={{ color: COLORS.muted, fontSize: "0.65rem" }}>~</span>}
+      </span>
+    );
+  }
 
   return (
     <div className="space-y-3 cfb-fade-in">
@@ -2850,9 +2910,7 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
         </div>
         <div className="cfb-mono text-xs flex items-center gap-1.5" style={{ color: COLORS.muted }}>
           {completedCount} of {totalGames} scored
-          {checkAgoLabel && (
-            <span style={{ color: COLORS.muted }}>· checked {checkAgoLabel}</span>
-          )}
+          {checkAgoLabel && <span>· checked {checkAgoLabel}</span>}
         </div>
       </div>
 
@@ -2876,11 +2934,23 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>
                 <span className="inline-flex items-center gap-1"><Flame size={11} style={{ color: COLORS.gold }} /> lock</span>
               </th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>
+                <span className="inline-flex items-center gap-1"><DollarSign size={11} style={{ color: COLORS.gold }} /> $</span>
+              </th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r, i) => {
               const isLeading = i === 0 && r.wins > 0 && (rows[0].wins > (rows[1]?.wins ?? -1));
+
+              const lockMoney = r.lockResult === "won"  ?  settings.lockAmount
+                              : r.lockResult === "lost" ? -settings.lockAmount
+                              : 0;
+              const weeklyMoney = (winnerMoney[r.name] || 0) + (loserMoney[r.name] || 0);
+              const total = lockMoney + weeklyMoney + r.udAmount;
+              // Projected if week not fully done or winner/loser not yet final
+              const projected = !allDone && (weeklyMoney !== 0);
+
               return (
                 <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                   <td className="px-3 py-2" style={{ color: isLeading ? COLORS.gold : COLORS.muted }}>
@@ -2900,10 +2970,13 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
                     {r.pending}
                   </td>
                   <td className="px-3 py-2 text-right">
-                    {r.lockResult === "won" && <span style={{ color: COLORS.goldBright }}>+$10</span>}
-                    {r.lockResult === "lost" && <span style={{ color: COLORS.redBright }}>−$10</span>}
+                    {r.lockResult === "won"  && <span style={{ color: COLORS.goldBright }}>+${settings.lockAmount}</span>}
+                    {r.lockResult === "lost" && <span style={{ color: COLORS.redBright }}>−${settings.lockAmount}</span>}
                     {r.lockResult === "push" && <span style={{ color: COLORS.muted }}>push</span>}
-                    {r.lockResult === null && <span style={{ color: COLORS.muted }}>—</span>}
+                    {r.lockResult === null   && <span style={{ color: COLORS.muted }}>—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-right font-semibold">
+                    {moneyCell(total, projected)}
                   </td>
                 </tr>
               );
@@ -2911,9 +2984,11 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
           </tbody>
         </table>
       </div>
+
       {!week.graded && completedCount > 0 && (
         <div className="text-xs" style={{ color: COLORS.muted }}>
-          Updates automatically when you open the app. {totalGames - completedCount} game{totalGames - completedCount === 1 ? "" : "s"} still to play.
+          {!allDone && "~ projected. "}Updates automatically when you open the app.{" "}
+          {totalGames - completedCount > 0 && `${totalGames - completedCount} game${totalGames - completedCount === 1 ? "" : "s"} still to play.`}
         </div>
       )}
     </div>
