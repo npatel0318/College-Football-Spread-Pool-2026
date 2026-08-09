@@ -4260,18 +4260,9 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
 
     setGames(
       sorted.map((g) => ({
-        id: newId(),
-        away: g.away,
-        home: g.home,
-        favorite: g.favorite,
-        spread: String(g.spread),
-        kickoffTime: g.kickoffTime || "",
-        kickoffISO: g.kickoffISO || "",
-        network: g.network || "",
-        homeLogo: g.homeLogo || "",
-        awayLogo: g.awayLogo || "",
-        homeColor: g.homeColor || "",
-        awayColor: g.awayColor || "",
+        ...g,                          // preserve ALL enriched fields (logos, colors, abbrevs, rank, neutral, conf…)
+        id: newId(),                   // fresh id for this week's copy
+        spread: String(g.spread),     // normalize spread to string for the editor
       }))
     );
     setImportPreview(null);
