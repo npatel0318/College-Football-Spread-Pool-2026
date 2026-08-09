@@ -924,15 +924,26 @@ export default function App() {
         totalCount: week.games.length,
       };
     }
+
+    // At this point every matched game is final. If some games couldn't be
+    // matched to ESPN, save what we have so the Results tab pre-fills those
+    // scores and the commissioner only needs to enter the unmatched ones.
+    // graded stays false until all scores are present.
     if (unmatched.length > 0) {
+      const partialGames = week.games.map((game) => {
+        const m = matched.find((x) => x.game.id === game.id);
+        return m ? { ...game, homeScore: m.espn.homeScore, awayScore: m.espn.awayScore } : game;
+      });
+      await saveResults(weekNum, partialGames);
+      const names = unmatched.map((g) => `${g.away} @ ${g.home}`).join(", ");
       return {
         status: "partial",
-        message: `Couldn't find scores for ${unmatched.length} game${unmatched.length === 1 ? "" : "s"}: ${unmatched.map((g) => `${g.away} @ ${g.home}`).join(", ")}. Grade those manually.`,
+        message: `${matched.length} of ${week.games.length} games auto-scored. Couldn't match: ${names}. Fill those in manually to finish grading.`,
         unmatched,
       };
     }
 
-    // All matched and final — save automatically
+    // All matched and final — save and mark graded
     const gamesWithScores = week.games.map((game) => {
       const m = matched.find((x) => x.game.id === game.id);
       return m ? { ...game, homeScore: m.espn.homeScore, awayScore: m.espn.awayScore } : game;
