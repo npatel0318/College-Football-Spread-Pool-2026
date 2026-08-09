@@ -3159,6 +3159,19 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
 
 function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff, autoLockedGameIds }) {
   const members = leagueMeta.members;
+
+  // Dot helper: small colored circle representing a team
+  function TeamDot({ color, size = 9 }) {
+    if (!color) return null;
+    return (
+      <span style={{
+        display: "inline-block", width: size, height: size,
+        borderRadius: "50%", background: color, flexShrink: 0,
+        verticalAlign: "middle",
+      }} />
+    );
+  }
+
   return (
     <div className="mt-2">
       <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.chalkDim }}>
@@ -3166,19 +3179,38 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
       </div>
       {hideUntilKickoff && !week.locked && (
         <div className="cfb-mono text-xs mb-2" style={{ color: COLORS.muted }}>
-          🔒 = picks hidden until that game kicks off
+          <Lock size={10} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
+          picks hidden until each game kicks off
         </div>
       )}
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
-        <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse" }}>
+        <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
+          <colgroup>
+            {/* sticky game column — wide enough for dot + abbrev + spread */}
+            <col style={{ width: 112 }} />
+            {/* member columns — narrow, first name only */}
+            {members.map((m) => <col key={m} style={{ width: 40 }} />)}
+          </colgroup>
           <thead>
             <tr>
-              <th className="text-left px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDeep, color: COLORS.chalkDim }}>
-                game
+              <th
+                className="text-left px-2 py-1.5"
+                style={{ position: "sticky", left: 0, background: COLORS.fieldDeep, color: COLORS.chalkDim, zIndex: 2 }}
+              >
+                matchup
               </th>
               {members.map((m) => (
-                <th key={m} className="text-left px-2 py-1.5 whitespace-nowrap" style={{ background: COLORS.fieldDeep, color: COLORS.chalkDim }}>
-                  {m}
+                <th
+                  key={m}
+                  className="px-1 py-1.5 text-center"
+                  style={{
+                    background: COLORS.fieldDeep, color: COLORS.chalkDim,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    fontSize: "0.65rem", letterSpacing: "0.03em",
+                  }}
+                  title={m}
+                >
+                  {m.split(" ")[0]}
                 </th>
               ))}
             </tr>
@@ -3186,74 +3218,117 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
           <tbody>
             {week.games.map((g, idx) => {
               const cover = coveringSide(g);
-              // A game's picks are revealed when:
-              // - hide mode is off (default), OR
-              // - game has kicked off (in autoLockedGameIds), OR
-              // - the week is fully graded
               const revealed = !hideUntilKickoff || autoLockedGameIds?.has(g.id) || week.graded;
+              const awayAbbr = teamAbbrev(g.away);
+              const homeAbbr = teamAbbrev(g.home);
+              const favAbbr  = g.favorite === "home" ? homeAbbr : awayAbbr;
+
               return (
                 <tr key={g.id} style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
-                    <div>{String(idx + 1).padStart(2, "0")}</div>
-                    {g.kickoffTime && (
-                      <div className="cfb-mono" style={{ fontSize: "0.6rem", color: COLORS.muted, lineHeight: 1.3 }}>{g.kickoffTime}</div>
-                    )}
+                  {/* Sticky game column */}
+                  <td
+                    className="px-2 py-1.5"
+                    style={{ position: "sticky", left: 0, background: COLORS.fieldDark, zIndex: 1, verticalAlign: "top" }}
+                  >
+                    {/* Away @ Home with color dots */}
+                    <div className="inline-flex items-center gap-1 flex-wrap" style={{ lineHeight: 1.4 }}>
+                      <TeamDot color={g.awayColor} />
+                      <span style={{ color: COLORS.chalk, fontSize: "0.72rem", fontWeight: 600 }}>{awayAbbr}</span>
+                      <span style={{ color: COLORS.muted, fontSize: "0.65rem" }}>@</span>
+                      <TeamDot color={g.homeColor} />
+                      <span style={{ color: COLORS.chalk, fontSize: "0.72rem", fontWeight: 600 }}>{homeAbbr}</span>
+                    </div>
+                    {/* Spread + time */}
+                    <div style={{ fontSize: "0.62rem", color: COLORS.muted, marginTop: 1, lineHeight: 1.3 }}>
+                      {g.spread ? `${favAbbr} -${g.spread}` : ""}
+                      {g.spread && g.kickoffTime ? " · " : ""}
+                      {g.kickoffTime || ""}
+                    </div>
                   </td>
+
+                  {/* Member pick cells */}
                   {members.map((m) => {
                     if (!revealed) {
                       return (
-                        <td key={m} className="px-2 py-1.5 text-center" style={{ color: COLORS.muted }}>
-                          🔒
+                        <td key={m} className="px-1 py-1.5 text-center" style={{ color: COLORS.muted }}>
+                          <Lock size={9} />
                         </td>
                       );
                     }
                     const slug = slugify(m);
                     const pick = picksCache[slug]?.picks?.[g.id];
                     const isLock = picksCache[slug]?.lockedGameId === g.id;
-                    const label = pick ? (pick === "home" ? g.home : g.away) : "—";
-                    const logo = pick ? (pick === "home" ? g.homeLogo : g.awayLogo) : "";
-                    const teamColor = pick ? (pick === "home" ? g.homeColor : g.awayColor) : "";
-                    let color = COLORS.chalkDim;
+                    const pickAbbr = pick ? (pick === "home" ? homeAbbr : awayAbbr) : null;
+                    const pickColor = pick ? (pick === "home" ? g.homeColor : g.awayColor) : null;
+                    let textColor = COLORS.chalkDim;
                     if (week.graded && pick) {
-                      if (cover === "push") color = COLORS.muted;
-                      else color = pick === cover ? COLORS.goldBright : COLORS.redBright;
+                      if (cover === "push") textColor = COLORS.muted;
+                      else textColor = pick === cover ? COLORS.goldBright : COLORS.redBright;
                     }
                     return (
-                      <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
-                        <span className="inline-flex items-center gap-1">
-                          {logo ? (
-                            <img src={logo} alt={label} style={{ width: 18, height: 18, objectFit: "contain", flexShrink: 0 }} onError={(e) => { e.target.style.display = "none"; }} />
-                          ) : pick && teamColor ? (
-                            <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", background: teamColor, flexShrink: 0 }} />
-                          ) : null}
-                          {label.split(" ")[0]}
-                          {isLock && <Flame size={11} style={{ color: COLORS.gold, flexShrink: 0 }} />}
-                        </span>
+                      <td key={m} className="px-1 py-1.5 text-center" style={{ color: textColor }}>
+                        {pick ? (
+                          <span className="inline-flex items-center justify-center gap-0.5">
+                            <TeamDot color={pickColor} size={7} />
+                            <span style={{ fontSize: "0.65rem", fontWeight: 600 }}>{pickAbbr}</span>
+                            {isLock && <Flame size={9} style={{ color: COLORS.gold, flexShrink: 0 }} />}
+                          </span>
+                        ) : (
+                          <span style={{ color: COLORS.muted, fontSize: "0.65rem" }}>—</span>
+                        )}
                       </td>
                     );
                   })}
                 </tr>
               );
             })}
+
+            {/* Underdog row */}
             <tr style={{ borderTop: `2px solid ${COLORS.lineStrong}` }}>
-              <td className="px-2 py-1.5 sticky left-0" style={{ background: COLORS.fieldDark, color: COLORS.muted }}>
+              <td
+                className="px-2 py-1.5"
+                style={{ position: "sticky", left: 0, background: COLORS.fieldDark, color: COLORS.muted }}
+              >
                 <span className="inline-flex items-center gap-1">
-                  <Flame size={11} style={{ color: COLORS.gold }} /> dog
+                  <Flame size={10} style={{ color: COLORS.gold }} />
+                  <span style={{ fontSize: "0.65rem" }}>underdog</span>
                 </span>
               </td>
               {members.map((m) => {
                 if (hideUntilKickoff && !week.locked && !week.graded) {
-                  return <td key={m} className="px-2 py-1.5 text-center" style={{ color: COLORS.muted }}>🔒</td>;
+                  return (
+                    <td key={m} className="px-1 py-1.5 text-center" style={{ color: COLORS.muted }}>
+                      <Lock size={9} />
+                    </td>
+                  );
                 }
                 const slug = slugify(m);
                 const pick = picksCache[slug]?.underdogPick;
                 const result = picksCache[slug]?.underdogResult;
-                let color = COLORS.chalkDim;
-                if (pick && result === true) color = COLORS.goldBright;
-                else if (pick && result === false) color = COLORS.redBright;
+                const udGame = pick
+                  ? week.games.find((g) => {
+                      const dog = g.favorite === "home" ? g.away : g.home;
+                      return dog?.toLowerCase() === pick?.team?.toLowerCase();
+                    })
+                  : null;
+                const udColor = udGame
+                  ? (udGame.favorite === "home" ? udGame.awayColor : udGame.homeColor)
+                  : null;
+                let textColor = COLORS.chalkDim;
+                if (pick && result === true)  textColor = COLORS.goldBright;
+                if (pick && result === false) textColor = COLORS.redBright;
                 return (
-                  <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
-                    {pick ? `${pick.team} +${pick.spread}` : "—"}
+                  <td key={m} className="px-1 py-1.5 text-center" style={{ color: textColor }}>
+                    {pick ? (
+                      <span className="inline-flex items-center justify-center gap-0.5">
+                        <TeamDot color={udColor} size={7} />
+                        <span style={{ fontSize: "0.62rem", fontWeight: 600 }}>
+                          {teamAbbrev(pick.team || pick)}
+                        </span>
+                      </span>
+                    ) : (
+                      <span style={{ color: COLORS.muted, fontSize: "0.65rem" }}>—</span>
+                    )}
                   </td>
                 );
               })}
