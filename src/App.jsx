@@ -180,32 +180,19 @@ function underdogPayout(spread, settings) {
 }
 
 // Returns a Set of game IDs whose day's first kickoff has already passed.
-// Games without kickoffISO are never auto-locked here (fall back to manual lock).
+// Each game locks at its own scheduled kickoff time.
+// kickoffISO is stored as a UTC ISO string from the Odds API (e.g. "2025-09-06T19:30:00Z").
+// Date.now() is also UTC, so the comparison is timezone-agnostic — works correctly
+// for any user anywhere in the world.
+// Games without a kickoffISO (manually entered) are never auto-locked; they only
+// lock when the commissioner manually locks the whole week.
 function computeAutoLockStatus(games, now = Date.now()) {
-  const dayFirstKickoff = {}; // "YYYY-MM-DD" (CT) → first kickoff timestamp (ms)
-  games.forEach((g) => {
-    if (!g.kickoffISO) return;
-    const ms = new Date(g.kickoffISO).getTime();
-    if (isNaN(ms)) return;
-    const dateKey = new Date(g.kickoffISO).toLocaleDateString("en-US", {
-      timeZone: "America/Chicago",
-      year: "numeric", month: "2-digit", day: "2-digit",
-    });
-    if (dayFirstKickoff[dateKey] == null || ms < dayFirstKickoff[dateKey]) {
-      dayFirstKickoff[dateKey] = ms;
-    }
-  });
-
   const locked = new Set();
   games.forEach((g) => {
     if (!g.kickoffISO) return;
-    const dateKey = new Date(g.kickoffISO).toLocaleDateString("en-US", {
-      timeZone: "America/Chicago",
-      year: "numeric", month: "2-digit", day: "2-digit",
-    });
-    if (dayFirstKickoff[dateKey] != null && now >= dayFirstKickoff[dateKey]) {
-      locked.add(g.id);
-    }
+    const kickoffMs = new Date(g.kickoffISO).getTime();
+    if (isNaN(kickoffMs)) return;
+    if (now >= kickoffMs) locked.add(g.id);
   });
   return locked;
 }
