@@ -4884,21 +4884,44 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                   </div>
                 ) : (
                   <div className="space-y-1">
-                    {selectedGamesList.map((g) => (
-                      <div key={g._idx} className="flex items-start gap-2 px-2 py-2 cfb-mono text-xs"
-                        style={{ background: COLORS.fieldMid, border: `1px solid ${COLORS.line}` }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div className="truncate" style={{ color: COLORS.chalk }}>{g.away} @ {g.home}</div>
-                          <div style={{ color: COLORS.muted }}>
-                            {g.kickoffTime || ""}
-                            {g.kickoffTime && g.spread ? " · " : ""}
-                            {g.spread ? `${g.favorite === "home" ? g.home : g.away} -${g.spread}` : ""}
+                    {selectedGamesList.map((g) => {
+                      const awayAbbr = g.awayAbbr || teamAbbrev(g.away);
+                      const homeAbbr = g.homeAbbr || teamAbbrev(g.home);
+                      const favAbbr  = g.favorite === "home" ? homeAbbr : awayAbbr;
+                      return (
+                        <div key={g._idx} className="cfb-mono"
+                          style={{ background: COLORS.fieldMid, border: `1px solid ${COLORS.line}`, padding: "8px 10px" }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                            {/* Teams: dot + abbrev, two lines */}
+                            <div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}>
+                                {g.awayColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.awayColor, flexShrink: 0, display: "inline-block" }} />}
+                                <span style={{ fontSize: "0.78rem", fontWeight: 600, color: COLORS.chalk }}>{awayAbbr}</span>
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}>
+                                <span style={{ fontSize: "0.62rem", color: COLORS.muted, width: 8, textAlign: "center", flexShrink: 0 }}>@</span>
+                                {g.homeColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.homeColor, flexShrink: 0, display: "inline-block" }} />}
+                                <span style={{ fontSize: "0.78rem", fontWeight: 600, color: COLORS.chalk }}>{homeAbbr}</span>
+                              </div>
+                              {g.kickoffTime && (
+                                <div style={{ fontSize: "0.62rem", color: COLORS.muted, marginTop: 2 }}>{g.kickoffTime}</div>
+                              )}
+                            </div>
+                            {/* Spread + remove */}
+                            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                              {g.spread ? (
+                                <div style={{ textAlign: "right" }}>
+                                  <span style={{ fontSize: "0.6rem", color: COLORS.muted }}>{favAbbr} </span>
+                                  <span style={{ fontSize: "0.78rem", fontWeight: 700, color: COLORS.goldBright }}>-{g.spread}</span>
+                                </div>
+                              ) : null}
+                              <button onClick={() => setImportSelected((s) => ({ ...s, [g._idx]: false }))}
+                                style={{ color: COLORS.muted, fontSize: "0.9rem", lineHeight: 1 }}>✕</button>
+                            </div>
                           </div>
                         </div>
-                        <button onClick={() => setImportSelected((s) => ({ ...s, [g._idx]: false }))}
-                          style={{ color: COLORS.muted, fontSize: "1rem", flexShrink: 0 }}>✕</button>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
