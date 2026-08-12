@@ -3936,8 +3936,11 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
             const rawRank = competitor.curatedRank?.current;
             const rank = rawRank != null && rawRank >= 1 && rawRank <= 25 ? rawRank : null;
             // Three-layer conference detection:
-            // 1. ESPN team-level conferenceId (works on some API versions)
-            const espnConfId = team.conferenceId || team.groups?.id || competitor.conferenceId;
+            // team.conferenceId is the team's own conference ID when ESPN exposes it.
+            // team.groups?.id is NOT a conference ID — it's an internal ESPN subdivision/group
+            // ID that shares numbers with conference IDs but means something different,
+            // which caused teams like Wisconsin to be misclassified as MAC (id 18).
+            const espnConfId = team.conferenceId || competitor.conferenceId;
             const confFromId = espnConfId ? (CONF_ID_MAP[String(espnConfId)] || "") : "";
             // Conference priority:
             // 1. ESPN team-level conferenceId (the team's own conference, not the game's)
@@ -4789,7 +4792,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           );
 
         const confBuckets = {};
-        const NOT_A_CONF = new Set(["Independents", "FBS", "NCAA", "College Football", "FCS", ""]);
+        const NOT_A_CONF = new Set(["FBS", "NCAA", "College Football", "FCS", ""]);
         indexed.forEach((g) => {
           const confs = new Set();
           if (g.homeConf && !NOT_A_CONF.has(g.homeConf)) confs.add(g.homeConf);
