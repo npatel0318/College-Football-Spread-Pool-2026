@@ -3939,11 +3939,15 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
             // 1. ESPN team-level conferenceId (works on some API versions)
             const espnConfId = team.conferenceId || team.groups?.id || competitor.conferenceId;
             const confFromId = espnConfId ? (CONF_ID_MAP[String(espnConfId)] || "") : "";
-            // 2. Game-level groups (only reliable for same-conference games)
-            // 3. Static lookup table — covers all FBS teams regardless of matchup type
+            // Conference priority:
+            // 1. ESPN team-level conferenceId (the team's own conference, not the game's)
+            // 2. Static TEAM_CONF lookup (our authoritative knowledge per team)
+            // 3. Game-level groups.shortName — LAST RESORT ONLY, because this reflects
+            //    the host conference and can misclassify guests (e.g. Notre Dame playing a
+            //    MAC team would get tagged MAC if we relied on game-level conference first)
             const conference = confFromId
-              || (gameConfIsReal ? gameConf : "")
               || TEAM_CONF[key]
+              || (gameConfIsReal ? gameConf : "")
               || "";
             teams[key] = {
               logo: team.logo || "",
@@ -4785,10 +4789,12 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           );
 
         const confBuckets = {};
+        const NOT_A_CONF = new Set(["Independents", "FBS", "NCAA", "College Football", "FCS", ""]);
         indexed.forEach((g) => {
           const confs = new Set();
-          if (g.homeConf) confs.add(g.homeConf);
-          if (g.awayConf) confs.add(g.awayConf);
+          if (g.homeConf && !NOT_A_CONF.has(g.homeConf)) confs.add(g.homeConf);
+          if (g.awayConf && !NOT_A_CONF.has(g.awayConf)) confs.add(g.awayConf);
+          // Games involving only Independents / unresolved teams fall to Other
           if (confs.size === 0) confs.add("Other");
           confs.forEach((conf) => {
             if (!confBuckets[conf]) confBuckets[conf] = [];
@@ -4919,62 +4925,12 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         }
 
         // Section list (shared between layouts)
-        function SectionList() {
-          const q = searchQuery.toLowerCase().trim();
-
-          // When searching: filter each section's games and auto-expand sections with hits
-          const visibleSections = sections
-            .map((s) => ({
-              ...s,
-              games: q
-                ? s.games.filter(
-                    (g) =>
-                      g.away.toLowerCase().includes(q) ||
-                      g.home.toLowerCase().includes(q)
-                  )
-                : s.games,
-            }))
-            .filter((s) => s.games.length > 0);
-
-          // When searching, all sections with results are shown expanded
-          const isExpanded = (label) =>
-            q ? true : expandedSections.has(label);
-
+        // Receives computed q and visibleSections so the search <input> can live
+        // in the stable IIFE return (not inside this function) — prevents focus loss on keystroke.
+        function SectionList({ q, visibleSections }) {
+          const isExpanded = (label) => q ? true : expandedSections.has(label);
           return (
             <div className="space-y-3">
-              {/* Search input */}
-              <div style={{ position: "relative" }}>
-                <Search
-                  size={13}
-                  style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, pointerEvents: "none" }}
-                />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search teams…"
-                  style={{
-                    width: "100%",
-                    paddingLeft: 30,
-                    paddingRight: searchQuery ? 28 : 8,
-                    paddingTop: 7,
-                    paddingBottom: 7,
-                    background: COLORS.fieldDeep,
-                    border: `1px solid ${searchQuery ? COLORS.goldBright : COLORS.lineStrong}`,
-                    color: COLORS.chalk,
-                    fontFamily: "var(--font-mono)",
-                    fontSize: "0.8rem",
-                  }}
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery("")}
-                    style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, fontSize: "1rem", lineHeight: 1 }}
-                  >×</button>
-                )}
-              </div>
-
-              {/* Global controls */}
               <div className="flex items-center gap-2 flex-wrap">
                 <button onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }}
                   className="cfb-mono text-xs px-2 py-1"
@@ -4984,19 +4940,13 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                   style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>clear all</button>
                 <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
                   {q
-                    ? `${visibleSections.reduce((n, s) => n + s.games.length, 0)} match${visibleSections.reduce((n,s)=>n+s.games.length,0)===1?"":"es"}`
+                    ? `${visibleSections.reduce((n, s) => n + s.games.length, 0)} result${visibleSections.reduce((n,s)=>n+s.games.length,0)===1?"":"s"}`
                     : `${totalGames} games available`}
                 </span>
               </div>
-
-              {/* No results */}
               {q && visibleSections.length === 0 && (
-                <div className="cfb-mono text-xs text-center py-4" style={{ color: COLORS.muted }}>
-                  No games match "{searchQuery}"
-                </div>
+                <div className="cfb-mono text-xs text-center py-4" style={{ color: COLORS.muted }}>No games match "{q}"</div>
               )}
-
-              {/* Collapsible conference sections */}
               {visibleSections.map((section) => {
                 const sectionIdxs = section.games.map((g) => g._idx);
                 const selectedInSection = sectionIdxs.filter((i) => importSelected[i]).length;
@@ -5007,15 +4957,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                   <div key={section.label}>
                     <div className="flex items-center justify-between px-2 py-1.5 mb-1 cursor-pointer"
                       style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
-                      onClick={() => {
-                        if (q) return; // don't toggle collapse while searching
-                        setExpandedSections((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(section.label)) next.delete(section.label);
-                          else next.add(section.label);
-                          return next;
-                        });
-                      }}>
+                      onClick={() => { if (q) return; setExpandedSections((prev) => { const next = new Set(prev); if (next.has(section.label)) next.delete(section.label); else next.add(section.label); return next; }); }}>
                       <span className="cfb-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2"
                         style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
                         {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
@@ -5040,6 +4982,32 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           );
         }
 
+        // Compute search results once — passed as props so SectionList doesn't recompute
+        const q = searchQuery.toLowerCase().trim();
+        const visibleSections = sections
+          .map((s) => ({ ...s, games: q ? s.games.filter((g) => g.away.toLowerCase().includes(q) || g.home.toLowerCase().includes(q)) : s.games }))
+          .filter((s) => s.games.length > 0);
+
+        // Search input is rendered directly in the return (not inside SectionList) so React
+        // reconciles it in-place on every render — input element is never unmounted, so
+        // focus is never lost when the user types.
+        const searchInput = (
+          <div style={{ position: "relative", marginBottom: 10 }}>
+            <Search size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, pointerEvents: "none" }} />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search teams…"
+              style={{ width: "100%", paddingLeft: 30, paddingRight: searchQuery ? 28 : 8, paddingTop: 7, paddingBottom: 7, background: COLORS.fieldDeep, border: `1px solid ${searchQuery ? COLORS.goldBright : COLORS.lineStrong}`, color: COLORS.chalk, fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery("")}
+                style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, fontSize: "1rem", lineHeight: 1 }}>×</button>
+            )}
+          </div>
+        );
+
         return (
           <>
             {/* ── DESKTOP: two-column split ── */}
@@ -5047,7 +5015,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
               <div style={{ display: "grid", gridTemplateColumns: "65% 35%", gap: 16, border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)", padding: 12 }}>
                 {/* Left: browseable game list */}
                 <div>
-                  <SectionList />
+                  {searchInput}
+                  <SectionList q={q} visibleSections={visibleSections} />
                 </div>
                 {/* Right: always-visible selected panel */}
                 <div style={{ border: `1px solid ${COLORS.lineStrong}`, background: COLORS.fieldDark, display: "flex", flexDirection: "column", maxHeight: 520, minHeight: 200, position: "sticky", top: 0 }}>
@@ -5089,7 +5058,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
 
                 {/* Section list */}
                 <div style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)", padding: 12 }}>
-                  <SectionList />
+                  {searchInput}
+                  <SectionList q={q} visibleSections={visibleSections} />
                 </div>
               </>
             )}
