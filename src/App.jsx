@@ -30,6 +30,7 @@ import {
   Eye,
   Clock,
   MoreHorizontal,
+  Search,
 } from "lucide-react";
 
 /* ----------------------------- design tokens ----------------------------- */
@@ -4038,12 +4039,14 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   // Import preview state
   const [expandedSections, setExpandedSections] = useState(new Set(["Top 25"]));
   const [showMobileSheet, setShowMobileSheet] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
-  // Reset sections and sheet when a fresh preview loads
+  // Reset sections, sheet, and search when a fresh preview loads
   useEffect(() => {
     if (importPreview) {
       setExpandedSections(new Set(["Top 25"]));
       setShowMobileSheet(false);
+      setSearchQuery("");
     }
   }, [!!importPreview]);
 
@@ -4815,9 +4818,12 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
 
         function SectionGameRow({ g }) {
           const checked = !!importSelected[g._idx];
+          const favAbbr = g.favorite === "home"
+            ? (g.homeAbbr || teamAbbrev(g.home))
+            : (g.awayAbbr || teamAbbrev(g.away));
           return (
             <label
-              className="flex items-start gap-2 px-2 py-2 text-xs cfb-mono cursor-pointer"
+              className="flex items-start gap-2 px-2 py-2.5 cfb-mono cursor-pointer"
               style={{
                 background: checked ? "rgba(217,164,65,0.1)" : COLORS.fieldDeep,
                 border: `1px solid ${checked ? COLORS.lineStrong : COLORS.line}`,
@@ -4827,25 +4833,39 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                 type="checkbox"
                 checked={checked}
                 onChange={() => setImportSelected((s) => ({ ...s, [g._idx]: !s[g._idx] }))}
-                style={{ width: 18, height: 18, flexShrink: 0, marginTop: 1 }}
+                style={{ width: 18, height: 18, flexShrink: 0, marginTop: 2 }}
               />
-              <div className="flex-1 min-w-0">
-                <div className="truncate" style={{ color: COLORS.chalk }}>
-                  {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : ""}
-                  {g.away}{" @ "}
-                  {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : ""}
-                  {g.home}
+              {/* Team names: two lines, no truncation */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                  <div>
+                    {/* Away */}
+                    <div style={{ fontSize: "0.78rem", color: COLORS.chalk, lineHeight: 1.4 }}>
+                      {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : null}
+                      {g.away}
+                    </div>
+                    {/* Home */}
+                    <div style={{ fontSize: "0.78rem", color: COLORS.chalk, lineHeight: 1.4 }}>
+                      <span style={{ color: COLORS.muted }}>@ </span>
+                      {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : null}
+                      {g.home}
+                    </div>
+                  </div>
+                  {/* Spread: compact number only — favored team shown by abbrev */}
+                  {g.spread ? (
+                    <div style={{ textAlign: "right", paddingTop: 1, flexShrink: 0 }}>
+                      <span style={{ fontSize: "0.65rem", color: COLORS.muted }}>{favAbbr} </span>
+                      <span style={{ fontSize: "0.78rem", color: COLORS.goldBright, fontWeight: 700 }}>-{g.spread}</span>
+                    </div>
+                  ) : null}
                 </div>
-                <div style={{ color: COLORS.muted }}>
+                {/* Meta row */}
+                <div style={{ fontSize: "0.67rem", color: COLORS.muted, marginTop: 3 }}>
                   {[g.kickoffTime, g.network].filter(Boolean).join(" · ")}
-                  {g.homeConf && g.awayConf && g.homeConf !== g.awayConf && (
-                    <span className="ml-1">· {g.awayConf} @ {g.homeConf}</span>
-                  )}
+                  {g.homeConf && g.awayConf && g.homeConf !== g.awayConf
+                    ? ` · ${g.awayConf} @ ${g.homeConf}` : ""}
                 </div>
               </div>
-              <span style={{ color: COLORS.goldBright, flexShrink: 0 }}>
-                {g.favorite === "home" ? g.home : g.away} -{g.spread}
-              </span>
             </label>
           );
         }
@@ -4900,8 +4920,60 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
 
         // Section list (shared between layouts)
         function SectionList() {
+          const q = searchQuery.toLowerCase().trim();
+
+          // When searching: filter each section's games and auto-expand sections with hits
+          const visibleSections = sections
+            .map((s) => ({
+              ...s,
+              games: q
+                ? s.games.filter(
+                    (g) =>
+                      g.away.toLowerCase().includes(q) ||
+                      g.home.toLowerCase().includes(q)
+                  )
+                : s.games,
+            }))
+            .filter((s) => s.games.length > 0);
+
+          // When searching, all sections with results are shown expanded
+          const isExpanded = (label) =>
+            q ? true : expandedSections.has(label);
+
           return (
             <div className="space-y-3">
+              {/* Search input */}
+              <div style={{ position: "relative" }}>
+                <Search
+                  size={13}
+                  style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, pointerEvents: "none" }}
+                />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search teams…"
+                  style={{
+                    width: "100%",
+                    paddingLeft: 30,
+                    paddingRight: searchQuery ? 28 : 8,
+                    paddingTop: 7,
+                    paddingBottom: 7,
+                    background: COLORS.fieldDeep,
+                    border: `1px solid ${searchQuery ? COLORS.goldBright : COLORS.lineStrong}`,
+                    color: COLORS.chalk,
+                    fontFamily: "var(--font-mono)",
+                    fontSize: "0.8rem",
+                  }}
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, fontSize: "1rem", lineHeight: 1 }}
+                  >×</button>
+                )}
+              </div>
+
               {/* Global controls */}
               <div className="flex items-center gap-2 flex-wrap">
                 <button onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }}
@@ -4910,28 +4982,43 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                 <button onClick={() => setImportSelected({})}
                   className="cfb-mono text-xs px-2 py-1"
                   style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>clear all</button>
-                <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{totalGames} games available</span>
+                <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                  {q
+                    ? `${visibleSections.reduce((n, s) => n + s.games.length, 0)} match${visibleSections.reduce((n,s)=>n+s.games.length,0)===1?"":"es"}`
+                    : `${totalGames} games available`}
+                </span>
               </div>
+
+              {/* No results */}
+              {q && visibleSections.length === 0 && (
+                <div className="cfb-mono text-xs text-center py-4" style={{ color: COLORS.muted }}>
+                  No games match "{searchQuery}"
+                </div>
+              )}
+
               {/* Collapsible conference sections */}
-              {sections.map((section) => {
+              {visibleSections.map((section) => {
                 const sectionIdxs = section.games.map((g) => g._idx);
                 const selectedInSection = sectionIdxs.filter((i) => importSelected[i]).length;
                 const allOn = selectedInSection === sectionIdxs.length;
                 const anyOn = selectedInSection > 0;
-                const isExpanded = expandedSections.has(section.label);
+                const expanded = isExpanded(section.label);
                 return (
                   <div key={section.label}>
                     <div className="flex items-center justify-between px-2 py-1.5 mb-1 cursor-pointer"
                       style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
-                      onClick={() => setExpandedSections((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(section.label)) next.delete(section.label);
-                        else next.add(section.label);
-                        return next;
-                      })}>
+                      onClick={() => {
+                        if (q) return; // don't toggle collapse while searching
+                        setExpandedSections((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(section.label)) next.delete(section.label);
+                          else next.add(section.label);
+                          return next;
+                        });
+                      }}>
                       <span className="cfb-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2"
                         style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
-                        {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                         {section.label === "Top 25" ? "🏆 Top 25" : section.label}
                         <span className="font-normal" style={{ color: COLORS.muted }}>{selectedInSection}/{section.games.length}</span>
                       </span>
@@ -4941,7 +5028,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                         {allOn ? "deselect" : anyOn ? "select rest" : "select all"}
                       </button>
                     </div>
-                    {isExpanded && (
+                    {expanded && (
                       <div className="space-y-1">
                         {section.games.map((g) => <SectionGameRow key={g._idx} g={g} />)}
                       </div>
