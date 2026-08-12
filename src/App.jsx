@@ -3856,6 +3856,35 @@ async function fetchLiveGameDetails(week) {
   return liveData;
 }
 
+// Fetches the date range ESPN assigns to a regular-season week.
+// Returns { from: "YYYY-MM-DD", to: "YYYY-MM-DD" } or null on failure.
+async function fetchEspnWeekDates(year, week) {
+  try {
+    const res = await fetch(
+      `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
+      `?seasontype=2&week=${week}&year=${year}&limit=200`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    // ESPN top-level week object has startDate / endDate
+    if (data.week?.startDate && data.week?.endDate) {
+      return {
+        from: data.week.startDate.slice(0, 10),
+        to:   data.week.endDate.slice(0, 10),
+      };
+    }
+    // Fallback: derive from individual game dates
+    const dates = (data.events || [])
+      .map((e) => e.competitions?.[0]?.date?.slice(0, 10))
+      .filter(Boolean)
+      .sort();
+    if (!dates.length) return null;
+    return { from: dates[0], to: dates[dates.length - 1] };
+  } catch {
+    return null;
+  }
+}
+
 function getDatesInRange(fromDateStr, toDateStr) {  const dates = [];
   const start = new Date(fromDateStr + "T00:00:00");
   const end = new Date(toDateStr + "T23:59:59");
@@ -3984,12 +4013,64 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const [oddsKeyInput, setOddsKeyInput] = useState("");
   const [oddsKeySaved, setOddsKeySaved] = useState(false);
   const [oddsKeyLoading, setOddsKeyLoading] = useState(true);
+  // Week picker — replaces manual date-range inputs
+  const defaultYear = new Date().getFullYear();
+  const [oddsYear, setOddsYear] = useState(defaultYear);
+  const [oddsWeek, setOddsWeek] = useState(nextWeekNum || 1);
+  const [oddsShowCustomRange, setOddsShowCustomRange] = useState(false);
   const [oddsFrom, setOddsFrom] = useState(isoDateInput(new Date()));
   const [oddsTo, setOddsTo] = useState(isoDateInput(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)));
   const [oddsBusy, setOddsBusy] = useState(false);
   const [oddsError, setOddsError] = useState(null);
   const [weekDatesFrom, setWeekDatesFrom] = useState("");
   const [weekDatesTo, setWeekDatesTo] = useState("");
+
+  // Import preview state
+  const [expandedSections, setExpandedSections] = useState(new Set(["Top 25"]));
+  const [showSelectedPanel, setShowSelectedPanel] = useState(false);
+
+  // Reset expanded sections and panel whenever a fresh preview loads
+  useEffect(() => {
+    if (importPreview) {
+      setExpandedSections(new Set(["Top 25"]));
+      setShowSelectedPanel(false);
+    }
+  }, [!!importPreview]);
+
+  // Kickoff sort helper — hoisted so it's available for the side panel too
+  const KICKOFF_DAY = { thu: 0, fri: 1, sat: 2, sun: 3, mon: 4, tue: 5, wed: 6 };
+  function kickoffSortKey(t) {
+    if (!t) return 9999;
+    const lower = t.toLowerCase();
+    const day  = lower.match(/^(mon|tue|wed|thu|fri|sat|sun)/);
+    const time = lower.match(/(\d+):(\d+)\s*(am|pm)/);
+    if (!day || !time) return 9999;
+    let h = Number(time[1]);
+    const m = Number(time[2]);
+    if (time[3] === "pm" && h !== 12) h += 12;
+    if (time[3] === "am" && h === 12) h = 0;
+    return (KICKOFF_DAY[day[1]] ?? 9) * 10000 + h * 100 + m;
+  }
+
+  // Computed selected games list for the side panel
+  const totalSelected = Object.values(importSelected).filter(Boolean).length;
+  const selectedGamesList = importPreview
+    ? importPreview
+        .map((g, i) => ({ ...g, _idx: i }))
+        .filter((g) => importSelected[g._idx])
+        .sort((a, b) => {
+          if (a.kickoffISO && b.kickoffISO)
+            return new Date(a.kickoffISO) - new Date(b.kickoffISO);
+          return kickoffSortKey(a.kickoffTime) - kickoffSortKey(b.kickoffTime);
+        })
+    : [];
+
+  // Auto-open the side panel the first time any game is selected
+  const prevTotalRef = useRef(0);
+  useEffect(() => {
+    if (prevTotalRef.current === 0 && totalSelected > 0) setShowSelectedPanel(true);
+    prevTotalRef.current = totalSelected;
+  }, [totalSelected]);
 
   const [shareMessage, setShareMessage] = useState("");
   const [shareCopied, setShareCopied] = useState(false);
@@ -4154,14 +4235,30 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     setOddsError(null);
     setOddsBusy(true);
     try {
+      const key = localStorage.getItem("cfbpool:odds-api-key") || oddsKeyInput.trim();
+      if (!key) { setOddsError("Enter your Odds API key first."); setOddsBusy(false); return; }
+
+      // Resolve the date range — ESPN week lookup or manual custom range
+      let from = oddsFrom, to = oddsTo;
+      if (!oddsShowCustomRange) {
+        const espnDates = await fetchEspnWeekDates(oddsYear, oddsWeek);
+        if (!espnDates) {
+          setOddsError(`Couldn't find ESPN dates for ${oddsYear} Week ${oddsWeek}. Try the custom date range option below.`);
+          setOddsBusy(false);
+          return;
+        }
+        from = espnDates.from;
+        to   = espnDates.to;
+      }
+
       const params = new URLSearchParams({
-        apiKey: oddsKeyInput.trim(),
+        apiKey: key,
         regions: "us",
         markets: "spreads",
         oddsFormat: "american",
       });
-      if (oddsFrom) params.set("commenceTimeFrom", `${oddsFrom}T00:00:00Z`);
-      if (oddsTo) params.set("commenceTimeTo", `${oddsTo}T23:59:59Z`);
+      if (from) params.set("commenceTimeFrom", `${from}T00:00:00Z`);
+      if (to)   params.set("commenceTimeTo",   `${to}T23:59:59Z`);
       const url = `https://api.the-odds-api.com/v4/sports/americanfootball_ncaaf/odds?${params.toString()}`;
 
       const res = await fetch(url);
@@ -4188,7 +4285,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         .filter((g) => g.home && g.away && g.homePoint != null);
 
       // Secondary fetch: ESPN scoreboard for TV network + team branding (best-effort, no API key needed)
-      const { networks: espnNetworks, teams: espnTeams, neutralGames } = await fetchEspnGameMetadata(oddsFrom, oddsTo).catch(() => ({ networks: {}, teams: {}, neutralGames: new Set() }));
+      const { networks: espnNetworks, teams: espnTeams, neutralGames } = await fetchEspnGameMetadata(from, to).catch(() => ({ networks: {}, teams: {}, neutralGames: new Set() }));
 
       const withNetworks = merged.map((g) => {
         const homeKey = g.home.toLowerCase();
@@ -4229,8 +4326,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         );
       } else {
         // Store these dates so Results can auto-fetch scores later
-        setWeekDatesFrom(oddsFrom);
-        setWeekDatesTo(oddsTo);
+        setWeekDatesFrom(from);
+        setWeekDatesTo(to);
         setImportPreview(withNetworks);
         setImportSelected({});
         setImportOpen(true);
@@ -4641,19 +4738,64 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                     remove key
                   </button>
                 </div>
+                {/* ── Week picker ── */}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>from date</div>
-                    <FieldInput type="date" value={oddsFrom} onChange={setOddsFrom} />
+                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>year</div>
+                    <select
+                      value={oddsYear}
+                      onChange={(e) => setOddsYear(Number(e.target.value))}
+                      style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}
+                    >
+                      {[defaultYear - 1, defaultYear, defaultYear + 1].map((y) => (
+                        <option key={y} value={y}>{y}</option>
+                      ))}
+                    </select>
                   </div>
                   <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>to date</div>
-                    <FieldInput type="date" value={oddsTo} onChange={setOddsTo} />
+                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>week</div>
+                    <select
+                      value={oddsWeek}
+                      onChange={(e) => setOddsWeek(Number(e.target.value))}
+                      style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}
+                    >
+                      {Array.from({ length: 16 }, (_, i) => i + 1).map((w) => (
+                        <option key={w} value={w}>Week {w}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
+
+                {/* Custom date range toggle (for bowls / edge cases) */}
+                <button
+                  onClick={() => setOddsShowCustomRange((v) => !v)}
+                  className="cfb-mono text-xs flex items-center gap-1"
+                  style={{ color: COLORS.muted }}
+                >
+                  {oddsShowCustomRange ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                  {oddsShowCustomRange ? "hide custom date range" : "use custom date range instead (bowls / playoffs)"}
+                </button>
+
+                {oddsShowCustomRange && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>from date</div>
+                      <FieldInput type="date" value={oddsFrom} onChange={setOddsFrom} />
+                    </div>
+                    <div>
+                      <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>to date</div>
+                      <FieldInput type="date" value={oddsTo} onChange={setOddsTo} />
+                    </div>
+                  </div>
+                )}
+
                 {oddsError && <Banner onDismiss={() => setOddsError(null)}>{oddsError}</Banner>}
                 <PrimaryButton full onClick={fetchOddsApiWeek} disabled={oddsBusy}>
-                  {oddsBusy ? "Fetching..." : "Fetch games in this range"}
+                  {oddsBusy
+                    ? "Fetching…"
+                    : oddsShowCustomRange
+                    ? "Fetch games in this range"
+                    : `Fetch ${oddsYear} Week ${oddsWeek} games`}
                 </PrimaryButton>
               </>
             )}
@@ -4701,9 +4843,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         const CONF_ORDER = ["SEC","Big Ten","Big 12","ACC","Mountain West","Sun Belt","American","MAC","C-USA","Independents"];
         const indexed = importPreview.map((g, i) => ({ ...g, _idx: i }));
         const totalGames = indexed.length;
-        const totalSelected = Object.values(importSelected).filter(Boolean).length;
 
-        // Top 25 section: any game with at least one ranked team, best matchup first
         const top25 = indexed
           .filter((g) => g.awayRank || g.homeRank)
           .sort((a, b) =>
@@ -4711,7 +4851,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
             Math.min(b.awayRank || 99, b.homeRank || 99)
           );
 
-        // Conference sections: each game goes into EVERY conference its teams belong to
         const confBuckets = {};
         indexed.forEach((g) => {
           const confs = new Set();
@@ -4724,7 +4863,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           });
         });
 
-        // Sort each conference bucket: ranked games first, then by best rank
         Object.values(confBuckets).forEach((games) =>
           games.sort((a, b) =>
             Math.min(a.awayRank || 99, a.homeRank || 99) -
@@ -4735,10 +4873,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         const confSorted = Object.keys(confBuckets).sort((a, b) => {
           const ai = CONF_ORDER.indexOf(a), bi = CONF_ORDER.indexOf(b);
           if (ai !== -1 && bi !== -1) return ai - bi;
-          if (ai !== -1) return -1;
-          if (bi !== -1) return 1;
-          if (a === "Other") return 1;
-          if (b === "Other") return -1;
+          if (ai !== -1) return -1; if (bi !== -1) return 1;
+          if (a === "Other") return 1; if (b === "Other") return -1;
           return a.localeCompare(b);
         });
 
@@ -4766,8 +4902,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
               <div className="flex-1 min-w-0">
                 <div className="truncate" style={{ color: COLORS.chalk }}>
                   {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : ""}
-                  {g.away}
-                  {" @ "}
+                  {g.away}{" @ "}
                   {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : ""}
                   {g.home}
                 </div>
@@ -4786,83 +4921,165 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         }
 
         return (
-          <div className="px-3 py-3 space-y-3" style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.06)" }}>
-
-            {/* Counter + global controls */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
+          <>
+            {/* Side panel — slides in from right */}
+            {showSelectedPanel && (
+              <>
                 <div
-                  className="cfb-mono text-lg font-bold leading-none"
-                  style={{ color: totalSelected > 0 ? COLORS.goldBright : COLORS.chalkDim }}
-                >
-                  {totalSelected}
-                </div>
-                <div className="cfb-mono text-xs" style={{ color: COLORS.chalkDim }}>
-                  / {totalGames}<br />selected
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => {
-                    const s = {};
-                    importPreview.forEach((_, i) => (s[i] = true));
-                    setImportSelected(s);
+                  onClick={() => setShowSelectedPanel(false)}
+                  style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.5)" }}
+                />
+                <div
+                  style={{
+                    position: "fixed", right: 0, top: 0, bottom: 0, zIndex: 61,
+                    width: "min(85vw, 360px)",
+                    background: COLORS.fieldDark, borderLeft: `1px solid ${COLORS.lineStrong}`,
+                    display: "flex", flexDirection: "column",
                   }}
-                  className="cfb-mono text-xs px-2 py-1"
-                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}
                 >
-                  select all
-                </button>
-                <button
-                  onClick={() => setImportSelected({})}
-                  className="cfb-mono text-xs px-2 py-1"
-                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
-                >
-                  clear all
-                </button>
-              </div>
-            </div>
-
-            {sections.map((section) => {
-              const sectionIdxs = section.games.map((g) => g._idx);
-              const selectedInSection = sectionIdxs.filter((i) => importSelected[i]).length;
-              const allOn = selectedInSection === sectionIdxs.length;
-              const anyOn = selectedInSection > 0;
-              return (
-                <div key={section.label}>
-                  <div
-                    className="flex items-center justify-between px-2 py-1.5 mb-1"
-                    style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
-                  >
-                    <span className="cfb-mono text-xs font-bold uppercase tracking-wider" style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
-                      {section.label === "Top 25" ? "🏆 Top 25" : section.label}
-                      <span className="ml-2 font-normal" style={{ color: COLORS.muted }}>
-                        {selectedInSection}/{section.games.length}
-                      </span>
+                  <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+                    <span className="cfb-mono font-bold text-sm" style={{ color: COLORS.goldBright }}>
+                      {totalSelected} game{totalSelected === 1 ? "" : "s"} selected
                     </span>
-                    <button
-                      onClick={() => {
-                        const patch = {};
-                        sectionIdxs.forEach((i) => (patch[i] = !allOn));
-                        setImportSelected((s) => ({ ...s, ...patch }));
-                      }}
-                      className="cfb-mono text-xs px-2 py-0.5"
-                      style={{ border: `1px solid ${COLORS.lineStrong}`, color: allOn ? COLORS.muted : COLORS.goldBright }}
-                    >
-                      {allOn ? "deselect all" : anyOn ? "select rest" : "select all"}
-                    </button>
+                    <button onClick={() => setShowSelectedPanel(false)} style={{ color: COLORS.muted, fontSize: "1.1rem" }}>✕</button>
                   </div>
-                  <div className="space-y-1">
-                    {section.games.map((g) => <SectionGameRow key={g._idx} g={g} />)}
+
+                  <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
+                    {selectedGamesList.length === 0 ? (
+                      <div className="cfb-mono text-xs text-center mt-4" style={{ color: COLORS.muted }}>
+                        No games selected yet
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        {selectedGamesList.map((g) => (
+                          <div key={g._idx} className="flex items-start gap-2 px-2 py-2 cfb-mono text-xs"
+                            style={{ background: COLORS.fieldMid, border: `1px solid ${COLORS.line}` }}>
+                            <div className="flex-1 min-w-0">
+                              <div className="truncate" style={{ color: COLORS.chalk }}>
+                                {g.away} @ {g.home}
+                              </div>
+                              <div style={{ color: COLORS.muted }}>
+                                {g.kickoffTime || ""}
+                                {g.kickoffTime && g.spread ? " · " : ""}
+                                {g.spread ? `${g.favorite === "home" ? g.home : g.away} -${g.spread}` : ""}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => setImportSelected((s) => ({ ...s, [g._idx]: false }))}
+                              style={{ color: COLORS.muted, fontSize: "1rem", flexShrink: 0 }}
+                            >✕</button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="px-4 py-3 space-y-2" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                    <button
+                      onClick={() => setImportSelected({})}
+                      className="cfb-mono text-xs w-full py-1.5"
+                      style={{ color: COLORS.muted, border: `1px solid ${COLORS.lineStrong}` }}
+                    >
+                      clear all
+                    </button>
+                    <PrimaryButton full onClick={() => { setShowSelectedPanel(false); applyImportSelection(); }} disabled={totalSelected === 0}>
+                      Use these {totalSelected} games
+                    </PrimaryButton>
                   </div>
                 </div>
-              );
-            })}
+              </>
+            )}
 
-            <PrimaryButton full onClick={applyImportSelection} disabled={totalSelected === 0}>
-              Use {totalSelected} selected game{totalSelected === 1 ? "" : "s"}
-            </PrimaryButton>
-          </div>
+            {/* Main import preview panel */}
+            <div className="px-3 py-3 space-y-3" style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.06)" }}>
+              {/* Counter + global controls */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="cfb-mono text-lg font-bold leading-none"
+                    style={{ color: totalSelected > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
+                    {totalSelected}
+                  </div>
+                  <div className="cfb-mono text-xs" style={{ color: COLORS.chalkDim }}>
+                    / {totalGames}<br />selected
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  {totalSelected > 0 && (
+                    <button
+                      onClick={() => setShowSelectedPanel(true)}
+                      className="cfb-mono text-xs px-2 py-1 flex items-center gap-1"
+                      style={{ border: `1px solid ${COLORS.gold}`, color: COLORS.goldBright }}
+                    >
+                      Review ({totalSelected}) →
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }}
+                    className="cfb-mono text-xs px-2 py-1"
+                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}
+                  >select all</button>
+                  <button
+                    onClick={() => setImportSelected({})}
+                    className="cfb-mono text-xs px-2 py-1"
+                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
+                  >clear all</button>
+                </div>
+              </div>
+
+              {/* Collapsible sections */}
+              {sections.map((section) => {
+                const sectionIdxs = section.games.map((g) => g._idx);
+                const selectedInSection = sectionIdxs.filter((i) => importSelected[i]).length;
+                const allOn = selectedInSection === sectionIdxs.length;
+                const anyOn = selectedInSection > 0;
+                const isExpanded = expandedSections.has(section.label);
+
+                return (
+                  <div key={section.label}>
+                    {/* Section header — click to expand/collapse */}
+                    <div
+                      className="flex items-center justify-between px-2 py-1.5 mb-1 cursor-pointer"
+                      style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
+                      onClick={() => setExpandedSections((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(section.label)) next.delete(section.label);
+                        else next.add(section.label);
+                        return next;
+                      })}
+                    >
+                      <span className="cfb-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2"
+                        style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
+                        {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                        {section.label === "Top 25" ? "🏆 Top 25" : section.label}
+                        <span className="font-normal" style={{ color: COLORS.muted }}>
+                          {selectedInSection}/{section.games.length}
+                        </span>
+                      </span>
+                      {/* Select-all for section — stop propagation so it doesn't toggle collapse */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const patch = {};
+                          sectionIdxs.forEach((i) => (patch[i] = !allOn));
+                          setImportSelected((s) => ({ ...s, ...patch }));
+                        }}
+                        className="cfb-mono text-xs px-2 py-0.5"
+                        style={{ border: `1px solid ${COLORS.lineStrong}`, color: allOn ? COLORS.muted : COLORS.goldBright }}
+                      >
+                        {allOn ? "deselect" : anyOn ? "select rest" : "select all"}
+                      </button>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="space-y-1">
+                        {section.games.map((g) => <SectionGameRow key={g._idx} g={g} />)}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
         );
       })()}
 
