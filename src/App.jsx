@@ -3936,20 +3936,11 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
             const rawRank = competitor.curatedRank?.current;
             const rank = rawRank != null && rawRank >= 1 && rawRank <= 25 ? rawRank : null;
             // Three-layer conference detection:
-            // team.conferenceId is the team's own conference ID when ESPN exposes it.
-            // team.groups?.id is NOT a conference ID — it's an internal ESPN subdivision/group
-            // ID that shares numbers with conference IDs but means something different,
-            // which caused teams like Wisconsin to be misclassified as MAC (id 18).
-            const espnConfId = team.conferenceId || competitor.conferenceId;
-            const confFromId = espnConfId ? (CONF_ID_MAP[String(espnConfId)] || "") : "";
-            // Conference priority:
-            // 1. ESPN team-level conferenceId (the team's own conference, not the game's)
-            // 2. Static TEAM_CONF lookup (our authoritative knowledge per team)
-            // 3. Game-level groups.shortName — LAST RESORT ONLY, because this reflects
-            //    the host conference and can misclassify guests (e.g. Notre Dame playing a
-            //    MAC team would get tagged MAC if we relied on game-level conference first)
-            const conference = confFromId
-              || TEAM_CONF[key]
+            // Do NOT use ESPN's team.conferenceId — the numeric IDs vary across
+            // ESPN API endpoints and are unreliable (e.g. ESPN uses 18 for FBS
+            // Independents in some responses, but 18 maps to MAC in others).
+            // TEAM_CONF covers all ~130 FBS teams and is authoritative.
+            const conference = TEAM_CONF[key]
               || (gameConfIsReal ? gameConf : "")
               || "";
             teams[key] = {
