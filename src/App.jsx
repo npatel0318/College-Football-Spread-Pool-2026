@@ -4025,15 +4025,25 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const [weekDatesFrom, setWeekDatesFrom] = useState("");
   const [weekDatesTo, setWeekDatesTo] = useState("");
 
+  // Responsive layout detection — desktop gets a split panel, mobile gets a bottom sheet
+  const [isDesktop, setIsDesktop] = useState(
+    typeof window !== "undefined" && window.innerWidth >= 768
+  );
+  useEffect(() => {
+    const handler = () => setIsDesktop(window.innerWidth >= 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
+
   // Import preview state
   const [expandedSections, setExpandedSections] = useState(new Set(["Top 25"]));
-  const [showSelectedPanel, setShowSelectedPanel] = useState(false);
+  const [showMobileSheet, setShowMobileSheet] = useState(false);
 
-  // Reset expanded sections and panel whenever a fresh preview loads
+  // Reset sections and sheet when a fresh preview loads
   useEffect(() => {
     if (importPreview) {
       setExpandedSections(new Set(["Top 25"]));
-      setShowSelectedPanel(false);
+      setShowMobileSheet(false);
     }
   }, [!!importPreview]);
 
@@ -4065,12 +4075,12 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         })
     : [];
 
-  // Auto-open the side panel the first time any game is selected
+  // On mobile, auto-open the review sheet when the first game is selected
   const prevTotalRef = useRef(0);
   useEffect(() => {
-    if (prevTotalRef.current === 0 && totalSelected > 0) setShowSelectedPanel(true);
+    if (!isDesktop && prevTotalRef.current === 0 && totalSelected > 0) setShowMobileSheet(true);
     prevTotalRef.current = totalSelected;
-  }, [totalSelected]);
+  }, [totalSelected, isDesktop]);
 
   const [shareMessage, setShareMessage] = useState("");
   const [shareCopied, setShareCopied] = useState(false);
@@ -4619,86 +4629,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         </div>
       </div>
 
-      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
-        <button
-          onClick={() => setCfbdOpen((o) => !o)}
-          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5 w-full"
-          style={{ color: COLORS.goldBright }}
-        >
-          <RefreshCw size={13} /> Pull from CollegeFootballData
-          <span className="flex-1" />
-          {cfbdOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-        </button>
-
-        {cfbdOpen && (
-          <div className="mt-3 space-y-3">
-            {cfbdKeyLoading ? (
-              <Spinner label="Checking for a saved key..." />
-            ) : !cfbdKeySaved ? (
-              <div className="space-y-2">
-                <div className="text-xs" style={{ color: COLORS.chalkDim }}>
-                  Paste a free CollegeFootballData.com API key. It's saved only on this device, never shared with the
-                  rest of the pool, and never stored in the app's code.
-                </div>
-                <FieldInput type="password" value={cfbdKeyInput} onChange={setCfbdKeyInput} placeholder="CFBD API key" />
-                <SecondaryButton onClick={saveCfbdKey} disabled={!cfbdKeyInput.trim()}>
-                  Save key on this device
-                </SecondaryButton>
-              </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between text-xs" style={{ color: COLORS.chalkDim }}>
-                  <span>Key saved on this device.</span>
-                  <button onClick={clearCfbdKey} className="opacity-70 hover:opacity-100">
-                    remove key
-                  </button>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>year</div>
-                    <FieldInput type="number" value={cfbdYear} onChange={setCfbdYear} />
-                  </div>
-                  <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>cfb week</div>
-                    <FieldInput type="number" value={cfbdWeek} onChange={setCfbdWeek} />
-                  </div>
-                </div>
-                <div>
-                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>season</div>
-                  <select
-                    value={cfbdSeasonType}
-                    onChange={(e) => setCfbdSeasonType(e.target.value)}
-                    className="cfb-mono text-base sm:text-sm px-2 py-2.5 sm:py-2 w-full"
-                    style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
-                  >
-                    <option value="regular">regular</option>
-                    <option value="postseason">postseason</option>
-                  </select>
-                </div>
-                <label className="flex items-center gap-2 text-xs cfb-mono cursor-pointer" style={{ color: COLORS.chalkDim }}>
-                  <input
-                    type="checkbox"
-                    checked={cfbdTop25Only}
-                    onChange={(e) => setCfbdTop25Only(e.target.checked)}
-                    style={{ width: 18, height: 18, flexShrink: 0 }}
-                  />
-                  Only games with a Top 25 team
-                </label>
-                <div>
-                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>
-                    conferences (comma-separated, optional)
-                  </div>
-                  <FieldInput value={cfbdConferences} onChange={setCfbdConferences} placeholder="SEC, Big Ten" />
-                </div>
-                {cfbdError && <Banner onDismiss={() => setCfbdError(null)}>{cfbdError}</Banner>}
-                <PrimaryButton full onClick={fetchCfbdWeek} disabled={cfbdBusy}>
-                  {cfbdBusy ? "Fetching..." : "Fetch this week's games"}
-                </PrimaryButton>
-              </>
-            )}
-          </div>
-        )}
-      </div>
 
       <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
         <button
@@ -4920,156 +4850,97 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           );
         }
 
-        return (
-          <>
-            {/* Side panel — slides in from right */}
-            {showSelectedPanel && (
-              <>
-                <div
-                  onClick={() => setShowSelectedPanel(false)}
-                  style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.5)" }}
-                />
-                <div
-                  style={{
-                    position: "fixed", right: 0, top: 0, bottom: 0, zIndex: 61,
-                    width: "min(85vw, 360px)",
-                    background: COLORS.fieldDark, borderLeft: `1px solid ${COLORS.lineStrong}`,
-                    display: "flex", flexDirection: "column",
-                  }}
-                >
-                  <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: `1px solid ${COLORS.line}` }}>
-                    <span className="cfb-mono font-bold text-sm" style={{ color: COLORS.goldBright }}>
-                      {totalSelected} game{totalSelected === 1 ? "" : "s"} selected
-                    </span>
-                    <button onClick={() => setShowSelectedPanel(false)} style={{ color: COLORS.muted, fontSize: "1.1rem" }}>✕</button>
-                  </div>
-
-                  <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
-                    {selectedGamesList.length === 0 ? (
-                      <div className="cfb-mono text-xs text-center mt-4" style={{ color: COLORS.muted }}>
-                        No games selected yet
-                      </div>
-                    ) : (
-                      <div className="space-y-1">
-                        {selectedGamesList.map((g) => (
-                          <div key={g._idx} className="flex items-start gap-2 px-2 py-2 cfb-mono text-xs"
-                            style={{ background: COLORS.fieldMid, border: `1px solid ${COLORS.line}` }}>
-                            <div className="flex-1 min-w-0">
-                              <div className="truncate" style={{ color: COLORS.chalk }}>
-                                {g.away} @ {g.home}
-                              </div>
-                              <div style={{ color: COLORS.muted }}>
-                                {g.kickoffTime || ""}
-                                {g.kickoffTime && g.spread ? " · " : ""}
-                                {g.spread ? `${g.favorite === "home" ? g.home : g.away} -${g.spread}` : ""}
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => setImportSelected((s) => ({ ...s, [g._idx]: false }))}
-                              style={{ color: COLORS.muted, fontSize: "1rem", flexShrink: 0 }}
-                            >✕</button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="px-4 py-3 space-y-2" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                    <button
-                      onClick={() => setImportSelected({})}
-                      className="cfb-mono text-xs w-full py-1.5"
-                      style={{ color: COLORS.muted, border: `1px solid ${COLORS.lineStrong}` }}
-                    >
-                      clear all
-                    </button>
-                    <PrimaryButton full onClick={() => { setShowSelectedPanel(false); applyImportSelection(); }} disabled={totalSelected === 0}>
-                      Use these {totalSelected} games
-                    </PrimaryButton>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Main import preview panel */}
-            <div className="px-3 py-3 space-y-3" style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.06)" }}>
-              {/* Counter + global controls */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="cfb-mono text-lg font-bold leading-none"
-                    style={{ color: totalSelected > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
-                    {totalSelected}
-                  </div>
-                  <div className="cfb-mono text-xs" style={{ color: COLORS.chalkDim }}>
-                    / {totalGames}<br />selected
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  {totalSelected > 0 && (
-                    <button
-                      onClick={() => setShowSelectedPanel(true)}
-                      className="cfb-mono text-xs px-2 py-1 flex items-center gap-1"
-                      style={{ border: `1px solid ${COLORS.gold}`, color: COLORS.goldBright }}
-                    >
-                      Review ({totalSelected}) →
-                    </button>
-                  )}
-                  <button
-                    onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }}
-                    className="cfb-mono text-xs px-2 py-1"
-                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}
-                  >select all</button>
-                  <button
-                    onClick={() => setImportSelected({})}
-                    className="cfb-mono text-xs px-2 py-1"
-                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
-                  >clear all</button>
-                </div>
+        // Reusable selected-games list content (shared by desktop panel + mobile sheet)
+        function SelectedPanel({ onUse }) {
+          return (
+            <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+              <div className="cfb-mono text-xs font-bold uppercase px-3 py-2" style={{ color: COLORS.goldBright, borderBottom: `1px solid ${COLORS.line}` }}>
+                {totalSelected > 0 ? `${totalSelected} selected · sorted by kickoff` : "no games selected yet"}
               </div>
+              <div style={{ flex: 1, overflowY: "auto", padding: "6px" }}>
+                {selectedGamesList.length === 0 ? (
+                  <div className="cfb-mono text-xs text-center py-6" style={{ color: COLORS.muted }}>
+                    Check a game on the left to add it here
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {selectedGamesList.map((g) => (
+                      <div key={g._idx} className="flex items-start gap-2 px-2 py-2 cfb-mono text-xs"
+                        style={{ background: COLORS.fieldMid, border: `1px solid ${COLORS.line}` }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="truncate" style={{ color: COLORS.chalk }}>{g.away} @ {g.home}</div>
+                          <div style={{ color: COLORS.muted }}>
+                            {g.kickoffTime || ""}
+                            {g.kickoffTime && g.spread ? " · " : ""}
+                            {g.spread ? `${g.favorite === "home" ? g.home : g.away} -${g.spread}` : ""}
+                          </div>
+                        </div>
+                        <button onClick={() => setImportSelected((s) => ({ ...s, [g._idx]: false }))}
+                          style={{ color: COLORS.muted, fontSize: "1rem", flexShrink: 0 }}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="px-3 py-2 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                {totalSelected > 0 && (
+                  <button onClick={() => setImportSelected({})}
+                    className="cfb-mono text-xs w-full py-1.5"
+                    style={{ color: COLORS.muted, border: `1px solid ${COLORS.lineStrong}` }}>
+                    clear all
+                  </button>
+                )}
+                <PrimaryButton full onClick={onUse} disabled={totalSelected === 0}>
+                  Use these {totalSelected} game{totalSelected === 1 ? "" : "s"}
+                </PrimaryButton>
+              </div>
+            </div>
+          );
+        }
 
-              {/* Collapsible sections */}
+        // Section list (shared between layouts)
+        function SectionList() {
+          return (
+            <div className="space-y-3">
+              {/* Global controls */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }}
+                  className="cfb-mono text-xs px-2 py-1"
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}>select all</button>
+                <button onClick={() => setImportSelected({})}
+                  className="cfb-mono text-xs px-2 py-1"
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>clear all</button>
+                <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{totalGames} games available</span>
+              </div>
+              {/* Collapsible conference sections */}
               {sections.map((section) => {
                 const sectionIdxs = section.games.map((g) => g._idx);
                 const selectedInSection = sectionIdxs.filter((i) => importSelected[i]).length;
                 const allOn = selectedInSection === sectionIdxs.length;
                 const anyOn = selectedInSection > 0;
                 const isExpanded = expandedSections.has(section.label);
-
                 return (
                   <div key={section.label}>
-                    {/* Section header — click to expand/collapse */}
-                    <div
-                      className="flex items-center justify-between px-2 py-1.5 mb-1 cursor-pointer"
+                    <div className="flex items-center justify-between px-2 py-1.5 mb-1 cursor-pointer"
                       style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
                       onClick={() => setExpandedSections((prev) => {
                         const next = new Set(prev);
                         if (next.has(section.label)) next.delete(section.label);
                         else next.add(section.label);
                         return next;
-                      })}
-                    >
+                      })}>
                       <span className="cfb-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2"
                         style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
                         {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                         {section.label === "Top 25" ? "🏆 Top 25" : section.label}
-                        <span className="font-normal" style={{ color: COLORS.muted }}>
-                          {selectedInSection}/{section.games.length}
-                        </span>
+                        <span className="font-normal" style={{ color: COLORS.muted }}>{selectedInSection}/{section.games.length}</span>
                       </span>
-                      {/* Select-all for section — stop propagation so it doesn't toggle collapse */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const patch = {};
-                          sectionIdxs.forEach((i) => (patch[i] = !allOn));
-                          setImportSelected((s) => ({ ...s, ...patch }));
-                        }}
+                      <button onClick={(e) => { e.stopPropagation(); const p = {}; sectionIdxs.forEach((i) => (p[i] = !allOn)); setImportSelected((s) => ({ ...s, ...p })); }}
                         className="cfb-mono text-xs px-2 py-0.5"
-                        style={{ border: `1px solid ${COLORS.lineStrong}`, color: allOn ? COLORS.muted : COLORS.goldBright }}
-                      >
+                        style={{ border: `1px solid ${COLORS.lineStrong}`, color: allOn ? COLORS.muted : COLORS.goldBright }}>
                         {allOn ? "deselect" : anyOn ? "select rest" : "select all"}
                       </button>
                     </div>
-
                     {isExpanded && (
                       <div className="space-y-1">
                         {section.games.map((g) => <SectionGameRow key={g._idx} g={g} />)}
@@ -5079,6 +4950,62 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                 );
               })}
             </div>
+          );
+        }
+
+        return (
+          <>
+            {/* ── DESKTOP: two-column split ── */}
+            {isDesktop ? (
+              <div style={{ display: "grid", gridTemplateColumns: "65% 35%", gap: 16, border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)", padding: 12 }}>
+                {/* Left: browseable game list */}
+                <div>
+                  <SectionList />
+                </div>
+                {/* Right: always-visible selected panel */}
+                <div style={{ border: `1px solid ${COLORS.lineStrong}`, background: COLORS.fieldDark, display: "flex", flexDirection: "column", maxHeight: 520, minHeight: 200, position: "sticky", top: 0 }}>
+                  <SelectedPanel onUse={applyImportSelection} />
+                </div>
+              </div>
+            ) : (
+              /* ── MOBILE: full-width list + sticky count bar + bottom sheet ── */
+              <>
+                {/* Mobile bottom sheet */}
+                {showMobileSheet && (
+                  <>
+                    <div onClick={() => setShowMobileSheet(false)}
+                      style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)" }} />
+                    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 61, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.lineStrong}`, borderRadius: "14px 14px 0 0", maxHeight: "65vh", display: "flex", flexDirection: "column" }}>
+                      <div style={{ width: 36, height: 4, borderRadius: 2, background: COLORS.lineStrong, margin: "10px auto 4px" }} />
+                      <div style={{ flex: 1, minHeight: 0 }}>
+                        <SelectedPanel onUse={() => { setShowMobileSheet(false); applyImportSelection(); }} />
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* Sticky count bar */}
+                <div style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.06)", padding: "8px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <span className="cfb-mono text-sm font-bold" style={{ color: totalSelected > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
+                    {totalSelected} <span className="font-normal text-xs" style={{ color: COLORS.chalkDim }}>/ {totalGames} selected</span>
+                  </span>
+                  <div className="flex gap-2">
+                    {totalSelected > 0 && (
+                      <button onClick={() => setShowMobileSheet(true)}
+                        className="cfb-mono text-xs px-3 py-1.5 font-bold"
+                        style={{ background: COLORS.gold, color: COLORS.ink, borderRadius: 3 }}>
+                        Review ({totalSelected}) →
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Section list */}
+                <div style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)", padding: 12 }}>
+                  <SectionList />
+                </div>
+              </>
+            )}
           </>
         );
       })()}
