@@ -3675,7 +3675,94 @@ function toCST(isoStr) {
   }) + " CT";
 }
 
-// Abbreviate a team name to 2-4 letters for compact score display
+// ESPN conference ID → short name. Stable across seasons.
+const CONF_ID_MAP = {
+  "1":"ACC","4":"C-USA","5":"Big Ten","8":"SEC","9":"Pac-12",
+  "10":"Mountain West","12":"Big 12","15":"Sun Belt","18":"MAC",
+  "37":"Independents","151":"American","152":"Independents",
+};
+
+// Full ESPN displayName (lowercase) → conference short name.
+// Covers all FBS teams for conference grouping in the import preview.
+// Update as needed after realignment.
+const TEAM_CONF = {
+  // SEC
+  "alabama crimson tide":"SEC","georgia bulldogs":"SEC","lsu tigers":"SEC",
+  "florida gators":"SEC","tennessee volunteers":"SEC","auburn tigers":"SEC",
+  "ole miss rebels":"SEC","texas a&m aggies":"SEC","mississippi state bulldogs":"SEC",
+  "south carolina gamecocks":"SEC","arkansas razorbacks":"SEC",
+  "vanderbilt commodores":"SEC","missouri tigers":"SEC","kentucky wildcats":"SEC",
+  "oklahoma sooners":"SEC","texas longhorns":"SEC",
+  // Big Ten
+  "ohio state buckeyes":"Big Ten","michigan wolverines":"Big Ten",
+  "penn state nittany lions":"Big Ten","iowa hawkeyes":"Big Ten",
+  "wisconsin badgers":"Big Ten","minnesota golden gophers":"Big Ten",
+  "illinois fighting illini":"Big Ten","indiana hoosiers":"Big Ten",
+  "michigan state spartans":"Big Ten","northwestern wildcats":"Big Ten",
+  "purdue boilermakers":"Big Ten","rutgers scarlet knights":"Big Ten",
+  "maryland terrapins":"Big Ten","nebraska cornhuskers":"Big Ten",
+  "ucla bruins":"Big Ten","usc trojans":"Big Ten",
+  "oregon ducks":"Big Ten","washington huskies":"Big Ten",
+  // Big 12
+  "kansas state wildcats":"Big 12","texas tech red raiders":"Big 12",
+  "baylor bears":"Big 12","tcu horned frogs":"Big 12",
+  "west virginia mountaineers":"Big 12","oklahoma state cowboys":"Big 12",
+  "iowa state cyclones":"Big 12","kansas jayhawks":"Big 12",
+  "cincinnati bearcats":"Big 12","houston cougars":"Big 12",
+  "byu cougars":"Big 12","ucf knights":"Big 12",
+  "colorado buffaloes":"Big 12","arizona wildcats":"Big 12",
+  "arizona state sun devils":"Big 12","utah utes":"Big 12",
+  // ACC
+  "clemson tigers":"ACC","florida state seminoles":"ACC","miami hurricanes":"ACC",
+  "nc state wolfpack":"ACC","wake forest demon deacons":"ACC","duke blue devils":"ACC",
+  "louisville cardinals":"ACC","pittsburgh panthers":"ACC","virginia tech hokies":"ACC",
+  "boston college eagles":"ACC","virginia cavaliers":"ACC",
+  "georgia tech yellow jackets":"ACC","syracuse orange":"ACC",
+  "north carolina tar heels":"ACC","cal golden bears":"ACC",
+  "smu mustangs":"ACC","stanford cardinal":"ACC",
+  // Mountain West
+  "boise state broncos":"Mountain West","unlv rebels":"Mountain West",
+  "san diego state aztecs":"Mountain West","fresno state bulldogs":"Mountain West",
+  "air force falcons":"Mountain West","hawaii rainbow warriors":"Mountain West",
+  "colorado state rams":"Mountain West","utah state aggies":"Mountain West",
+  "nevada wolf pack":"Mountain West","san jose state spartans":"Mountain West",
+  "san josé state spartans":"Mountain West","wyoming cowboys":"Mountain West",
+  "new mexico lobos":"Mountain West",
+  // American
+  "tulane green wave":"American","tulsa golden hurricane":"American",
+  "uab blazers":"American","memphis tigers":"American",
+  "east carolina pirates":"American","florida atlantic owls":"American",
+  "charlotte 49ers":"American","rice owls":"American",
+  "utsa roadrunners":"American","north texas mean green":"American",
+  "south florida bulls":"American","usf bulls":"American",
+  "navy midshipmen":"American","temple owls":"American",
+  "middle tennessee blue raiders":"American",
+  // Sun Belt
+  "louisiana ragin' cajuns":"Sun Belt","louisiana ragin cajuns":"Sun Belt",
+  "appalachian state mountaineers":"Sun Belt","texas state bobcats":"Sun Belt",
+  "georgia state panthers":"Sun Belt","south alabama jaguars":"Sun Belt",
+  "troy trojans":"Sun Belt","old dominion monarchs":"Sun Belt",
+  "georgia southern eagles":"Sun Belt","arkansas state red wolves":"Sun Belt",
+  "marshall thundering herd":"Sun Belt","james madison dukes":"Sun Belt",
+  "southern miss golden eagles":"Sun Belt","coastal carolina chanticleers":"Sun Belt",
+  // MAC
+  "ohio bobcats":"MAC","miami oh redhawks":"MAC","miami (oh) redhawks":"MAC",
+  "bowling green falcons":"MAC","kent state golden flashes":"MAC",
+  "northern illinois huskies":"MAC","akron zips":"MAC",
+  "central michigan chippewas":"MAC","eastern michigan eagles":"MAC",
+  "western michigan broncos":"MAC","ball state cardinals":"MAC",
+  "buffalo bulls":"MAC","toledo rockets":"MAC",
+  // C-USA
+  "florida international panthers":"C-USA","fiu panthers":"C-USA",
+  "jacksonville state gamecocks":"C-USA","louisiana tech bulldogs":"C-USA",
+  "new mexico state aggies":"C-USA","utep miners":"C-USA",
+  "western kentucky hilltoppers":"C-USA","liberty flames":"C-USA",
+  "sam houston bearkats":"C-USA","kennesaw state owls":"C-USA",
+  // Independents
+  "notre dame fighting irish":"Independents",
+  "connecticut huskies":"Independents",
+  "army black knights":"Independents",
+};
 function teamAbbrev(name) {
   if (!name) return "";
   const words = name.split(/\s+/).filter((w) => w && w !== "&");
@@ -3798,11 +3885,15 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
         if (!comp) continue;
         const networkNames = (comp.broadcasts || []).flatMap((b) => b.names || []).filter(Boolean);
         const network = networkNames[0] || "";
-        // Conference name lives on the competition's groups object
-        const confShort = comp.groups?.shortName || comp.groups?.name || "";
         // Neutral site: ESPN sets competition.neutralSite = true for bowl games,
         // CFP games, and neutral-site kickoff classic games
         const isNeutral = comp.neutralSite === true;
+        // Game-level conference: only populated for same-conference matchups.
+        // Cross-conference games have no group or a generic "FBS" group.
+        const gameConf = comp.groups?.shortName || comp.groups?.name || "";
+        const gameConfIsReal = gameConf &&
+          !["fbs","ncaa","college football","fcs"].includes(gameConf.toLowerCase());
+
         const competitorNames = [];
         for (const competitor of comp.competitors || []) {
           const team = competitor.team;
@@ -3814,13 +3905,23 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
           if (!teams[key]) {
             const rawRank = competitor.curatedRank?.current;
             const rank = rawRank != null && rawRank >= 1 && rawRank <= 25 ? rawRank : null;
+            // Three-layer conference detection:
+            // 1. ESPN team-level conferenceId (works on some API versions)
+            const espnConfId = team.conferenceId || team.groups?.id || competitor.conferenceId;
+            const confFromId = espnConfId ? (CONF_ID_MAP[String(espnConfId)] || "") : "";
+            // 2. Game-level groups (only reliable for same-conference games)
+            // 3. Static lookup table — covers all FBS teams regardless of matchup type
+            const conference = confFromId
+              || (gameConfIsReal ? gameConf : "")
+              || TEAM_CONF[key]
+              || "";
             teams[key] = {
               logo: team.logo || "",
               color: team.color ? `#${team.color}` : "",
               altColor: team.alternateColor ? `#${team.alternateColor}` : "",
               abbreviation: team.abbreviation || "",
               rank,
-              conference: confShort,
+              conference,
             };
           }
         }
