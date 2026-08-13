@@ -3187,10 +3187,10 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
         <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
           <colgroup>
-            {/* sticky game column — wide enough for dot + abbrev + spread */}
+            {/* sticky game column */}
             <col style={{ width: 112 }} />
-            {/* member columns — slightly wider for first name + last initial */}
-            {members.map((m) => <col key={m} style={{ width: 48 }} />)}
+            {/* member columns — wide enough for "Firstname L." without clipping */}
+            {members.map((m) => <col key={m} style={{ width: 68 }} />)}
           </colgroup>
           <thead>
             <tr>
@@ -3210,9 +3210,11 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
                     key={m}
                     className="px-1 py-1.5 text-center"
                     style={{
-                      background: COLORS.fieldDeep, color: COLORS.chalkDim,
-                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      fontSize: "0.65rem", letterSpacing: "0.03em",
+                      background: COLORS.fieldDeep,
+                      color: COLORS.chalkDim,
+                      whiteSpace: "nowrap",
+                      fontSize: "0.65rem",
+                      letterSpacing: "0.03em",
                     }}
                     title={m}
                   >
