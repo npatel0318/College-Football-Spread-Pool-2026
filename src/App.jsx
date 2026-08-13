@@ -3185,7 +3185,7 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
         </div>
       )}
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
-        <table className="cfb-mono text-xs w-full" style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
+        <table className="cfb-mono text-xs" style={{ borderCollapse: "collapse", minWidth: "max-content" }}>
           <colgroup>
             {/* sticky game column */}
             <col style={{ width: 112 }} />
