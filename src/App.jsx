@@ -3189,8 +3189,8 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
           <colgroup>
             {/* sticky game column — wide enough for dot + abbrev + spread */}
             <col style={{ width: 112 }} />
-            {/* member columns — narrow, first name only */}
-            {members.map((m) => <col key={m} style={{ width: 40 }} />)}
+            {/* member columns — slightly wider for first name + last initial */}
+            {members.map((m) => <col key={m} style={{ width: 48 }} />)}
           </colgroup>
           <thead>
             <tr>
@@ -3200,20 +3200,26 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
               >
                 matchup
               </th>
-              {members.map((m) => (
-                <th
-                  key={m}
-                  className="px-1 py-1.5 text-center"
-                  style={{
-                    background: COLORS.fieldDeep, color: COLORS.chalkDim,
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    fontSize: "0.65rem", letterSpacing: "0.03em",
-                  }}
-                  title={m}
-                >
-                  {m.split(" ")[0]}
-                </th>
-              ))}
+              {members.map((m) => {
+                const parts = m.trim().split(/\s+/);
+                const label = parts.length > 1
+                  ? `${parts[0]} ${parts[parts.length - 1][0]}.`
+                  : parts[0];
+                return (
+                  <th
+                    key={m}
+                    className="px-1 py-1.5 text-center"
+                    style={{
+                      background: COLORS.fieldDeep, color: COLORS.chalkDim,
+                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      fontSize: "0.65rem", letterSpacing: "0.03em",
+                    }}
+                    title={m}
+                  >
+                    {label}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
