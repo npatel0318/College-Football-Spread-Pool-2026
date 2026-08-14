@@ -1880,7 +1880,10 @@ export default function App() {
       </div>
 
       {/* main content — padded bottom so nothing hides behind the tab bar */}
-      <div className="p-4 max-w-2xl mx-auto" style={{ paddingBottom: "calc(72px + env(safe-area-inset-bottom))" }}>
+      <div
+        className={`p-4 mx-auto ${activeTab === "commish" ? "max-w-5xl" : "max-w-2xl"}`}
+        style={{ paddingBottom: "calc(72px + env(safe-area-inset-bottom))" }}
+      >
         {error && <div className="mb-3"><Banner onDismiss={() => setError(null)}>{error}</Banner></div>}
 
         {activeTab === "picks" && (
@@ -3666,14 +3669,22 @@ function CommishTab({
 
       {isDesktop ? (
         /* ── DESKTOP: persistent sidebar + content panel ── */
-        <div style={{ display: "flex", minHeight: 480, border: `1px solid ${COLORS.line}`, borderRadius: 4 }}>
+        <div style={{ display: "flex", gap: 0, minHeight: 600 }}>
           {/* Sidebar */}
-          <div style={{ width: 188, flexShrink: 0, borderRight: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep, display: "flex", flexDirection: "column" }}>
+          <div style={{
+            width: 220,
+            flexShrink: 0,
+            borderRight: `1px solid ${COLORS.line}`,
+            background: COLORS.fieldDeep,
+            display: "flex",
+            flexDirection: "column",
+            paddingTop: 8,
+          }}>
             {NAV_GROUPS.map((group) => (
               <div key={group.label}>
                 <div
-                  className="cfb-mono text-xs uppercase px-3 pt-3 pb-1"
-                  style={{ color: COLORS.muted, letterSpacing: "0.07em" }}
+                  className="cfb-mono text-xs uppercase px-4 pt-4 pb-2"
+                  style={{ color: COLORS.muted, letterSpacing: "0.08em", fontSize: "0.6rem" }}
                 >
                   {group.label}
                 </div>
@@ -3684,16 +3695,17 @@ function CommishTab({
                     <button
                       key={item.id}
                       onClick={() => goMode(item.id)}
-                      className="cfb-mono cfb-btn w-full flex items-center gap-2 px-3 py-2.5 text-xs text-left"
+                      className="cfb-mono cfb-btn w-full flex items-center gap-2.5 px-4 py-2.5 text-left"
                       style={{
-                        background: active ? "rgba(217,164,65,0.07)" : "transparent",
+                        fontSize: "0.8rem",
+                        background: active ? "rgba(217,164,65,0.09)" : "transparent",
                         color: active ? COLORS.goldBright : COLORS.chalkDim,
-                        borderLeft: `2px solid ${active ? COLORS.gold : "transparent"}`,
+                        borderLeft: `3px solid ${active ? COLORS.gold : "transparent"}`,
                         borderRadius: 0,
                         WebkitTapHighlightColor: "transparent",
                       }}
                     >
-                      <Icon size={13} style={{ flexShrink: 0 }} />
+                      <Icon size={14} style={{ flexShrink: 0, opacity: active ? 1 : 0.6 }} />
                       {item.label}
                     </button>
                   );
@@ -3701,20 +3713,20 @@ function CommishTab({
               </div>
             ))}
 
-            {/* Danger zone trigger at bottom of sidebar */}
-            <div style={{ marginTop: "auto", borderTop: `1px solid ${COLORS.line}`, padding: "12px 12px 14px" }}>
+            {/* Danger zone at bottom of sidebar */}
+            <div style={{ marginTop: "auto", borderTop: `1px solid ${COLORS.line}`, padding: "14px 16px 16px" }}>
               <button
                 onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
-                className="cfb-mono text-xs flex items-center gap-1.5 opacity-60 hover:opacity-100"
-                style={{ color: COLORS.redBright }}
+                className="cfb-mono text-xs flex items-center gap-1.5"
+                style={{ color: COLORS.red, opacity: 0.55 }}
               >
                 <AlertCircle size={12} /> Danger zone
               </button>
             </div>
           </div>
 
-          {/* Content area */}
-          <div style={{ flex: 1, minWidth: 0, padding: "20px 24px", background: COLORS.fieldDark, overflowY: "auto" }}>
+          {/* Content area — takes remaining space, no border box */}
+          <div style={{ flex: 1, minWidth: 0, padding: "24px 32px", overflowY: "auto" }}>
             {modeContent}
             {resetOpen && dangerZone}
           </div>
