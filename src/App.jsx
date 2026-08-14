@@ -4228,6 +4228,255 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     setConfirmingGames(null);
   }
 
+  // ── fetch from Odds API ───────────────────────────────────────────────────
+  async function fetchOddsApiWeek() {
+    setOddsError(null);
+    setOddsBusy(true);
+    try {
+      const key = localStorage.getItem("cfbpool:odds-api-key") || oddsKeyInput.trim();
+      if (!key) { setOddsError("Enter your Odds API key first."); return; }
+
+      let from = oddsFrom, to = oddsTo;
+      if (!oddsShowCustomRange) {
+        const espnDates = await fetchEspnWeekDates(oddsYear, oddsWeek);
+        if (!espnDates) {
+          setOddsError(`Couldn't find ESPN dates for ${oddsYear} Week ${oddsWeek}. Try the custom date range option.`);
+          return;
+        }
+        from = espnDates.from; to = espnDates.to;
+      }
+
+      const params = new URLSearchParams({ apiKey: key, regions: "us", markets: "spreads", oddsFormat: "american" });
+      if (from) params.set("commenceTimeFrom", `${from}T00:00:00Z`);
+      if (to)   params.set("commenceTimeTo",   `${to}T23:59:59Z`);
+      const res = await fetch(`https://api.the-odds-api.com/v4/sports/americanfootball_ncaaf/odds?${params}`);
+      if (!res.ok) { setOddsError(`Odds API error ${res.status} — check your key and try again.`); return; }
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) { setOddsError("No games found for this date range."); return; }
+
+      const { networks: espnNetworks, teams: espnTeams, neutralGames } = await fetchEspnGameMetadata(from, to)
+        .catch(() => ({ networks: {}, teams: {}, neutralGames: new Set() }));
+
+      const enriched = [];
+      for (const ev of data) {
+        const spreadsMarket = ev.bookmakers?.[0]?.markets?.find((m) => m.key === "spreads");
+        if (!spreadsMarket) continue;
+        const home = ev.home_team, away = ev.away_team;
+        const homeOut = spreadsMarket.outcomes?.find((o) => o.name === home);
+        const awayOut = spreadsMarket.outcomes?.find((o) => o.name === away);
+        if (!homeOut || !awayOut) continue;
+        const homePoint = homeOut.point;
+        const homeKey = home.toLowerCase(), awayKey = away.toLowerCase();
+        const ht = espnTeams[homeKey] || {}, at = espnTeams[awayKey] || {};
+        const homeConf = ht.conference || "", awayConf = at.conference || "";
+        enriched.push({
+          away, home,
+          favorite: homePoint < 0 ? "home" : "away",
+          spread: Math.abs(homePoint),
+          kickoffTime: toCST(ev.commence_time),
+          kickoffISO: ev.commence_time || "",
+          network: espnNetworks[homeKey] || espnNetworks[awayKey] || "",
+          homeLogo: ht.logo || "", awayLogo: at.logo || "",
+          homeColor: ht.color || "", awayColor: at.color || "",
+          homeAbbr: ht.abbreviation || teamAbbrev(home),
+          awayAbbr: at.abbreviation || teamAbbrev(away),
+          conference: homeConf === awayConf ? homeConf : (homeConf || awayConf || ""),
+          homeConf, awayConf,
+          homeRank: ht.rank || null, awayRank: at.rank || null,
+          neutral: neutralGames.has([homeKey, awayKey].sort().join("__")),
+        });
+      }
+
+      setWeekDatesFrom(from); setWeekDatesTo(to);
+      setImportPreview(enriched);
+      setImportSelected({});
+    } catch (e) {
+      setOddsError(`Error: ${e?.message || "Unknown error"}`);
+    } finally {
+      setOddsBusy(false);
+    }
+  }
+
+  // ── import preview panel (inline to access state via closure) ─────────────
+  function ImportPreviewPanel() {
+    const CONF_ORDER = ["SEC","Big Ten","Big 12","ACC","Mountain West","Sun Belt","American","MAC","C-USA","Independents"];
+    const NOT_A_CONF_SET = new Set(["FBS","NCAA","College Football","FCS",""]);
+    const indexed = importPreview.map((g, i) => ({ ...g, _idx: i }));
+    const totalGames = indexed.length;
+
+    const top25 = indexed.filter((g) => g.awayRank || g.homeRank)
+      .sort((a, b) => Math.min(a.awayRank||99,a.homeRank||99) - Math.min(b.awayRank||99,b.homeRank||99));
+
+    const confBuckets = {};
+    indexed.forEach((g) => {
+      const confs = new Set();
+      if (g.homeConf && !NOT_A_CONF_SET.has(g.homeConf)) confs.add(g.homeConf);
+      if (g.awayConf && !NOT_A_CONF_SET.has(g.awayConf)) confs.add(g.awayConf);
+      if (!confs.size) confs.add("Other");
+      confs.forEach((c) => { if (!confBuckets[c]) confBuckets[c] = []; confBuckets[c].push(g); });
+    });
+    const confSorted = Object.keys(confBuckets).sort((a, b) => {
+      const ai = CONF_ORDER.indexOf(a), bi = CONF_ORDER.indexOf(b);
+      if (ai !== -1 && bi !== -1) return ai - bi;
+      if (ai !== -1) return -1; if (bi !== -1) return 1;
+      if (a === "Other") return 1; if (b === "Other") return -1;
+      return a.localeCompare(b);
+    });
+    const sections = [...(top25.length ? [{ label: "Top 25", games: top25 }] : []), ...confSorted.map((c) => ({ label: c, games: confBuckets[c] }))];
+
+    // search
+    const q = searchQuery.toLowerCase().trim();
+    const visibleSections = sections.map((s) => ({
+      ...s, games: q ? s.games.filter((g) => g.away.toLowerCase().includes(q) || g.home.toLowerCase().includes(q)) : s.games,
+    })).filter((s) => s.games.length > 0);
+
+    // search input is rendered outside SectionList to prevent focus loss
+    const searchInput = (
+      <div style={{ position: "relative", marginBottom: 10 }}>
+        <Search size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, pointerEvents: "none" }} />
+        <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search teams…"
+          style={{ width: "100%", paddingLeft: 30, paddingRight: searchQuery ? 28 : 8, paddingTop: 7, paddingBottom: 7, background: COLORS.fieldDeep, border: `1px solid ${searchQuery ? COLORS.goldBright : COLORS.lineStrong}`, color: COLORS.chalk, fontFamily: "var(--font-mono)", fontSize: "0.8rem" }} />
+        {searchQuery && <button onClick={() => setSearchQuery("")} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, fontSize: "1rem", lineHeight: 1 }}>×</button>}
+      </div>
+    );
+
+    function SectionGameRow({ g }) {
+      const checked = !!importSelected[g._idx];
+      const favAbbr = g.favorite === "home" ? (g.homeAbbr || teamAbbrev(g.home)) : (g.awayAbbr || teamAbbrev(g.away));
+      return (
+        <label className="flex items-start gap-2 px-2 py-2.5 cfb-mono cursor-pointer"
+          style={{ background: checked ? "rgba(217,164,65,0.1)" : COLORS.fieldDeep, border: `1px solid ${checked ? COLORS.lineStrong : COLORS.line}` }}>
+          <input type="checkbox" checked={checked} onChange={() => setImportSelected((s) => ({ ...s, [g._idx]: !s[g._idx] }))}
+            style={{ width: 18, height: 18, flexShrink: 0, marginTop: 2 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+              <div>
+                <div style={{ fontSize: "0.78rem", color: COLORS.chalk, lineHeight: 1.4 }}>{g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : null}{g.away}</div>
+                <div style={{ fontSize: "0.78rem", color: COLORS.chalk, lineHeight: 1.4 }}><span style={{ color: COLORS.muted }}>@ </span>{g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : null}{g.home}</div>
+              </div>
+              {g.spread ? <div style={{ textAlign: "right", paddingTop: 1, flexShrink: 0 }}><span style={{ fontSize: "0.65rem", color: COLORS.muted }}>{favAbbr} </span><span style={{ fontSize: "0.78rem", color: COLORS.goldBright, fontWeight: 700 }}>-{g.spread}</span></div> : null}
+            </div>
+            <div style={{ fontSize: "0.67rem", color: COLORS.muted, marginTop: 3 }}>{[g.kickoffTime, g.network].filter(Boolean).join(" · ")}{g.homeConf && g.awayConf && g.homeConf !== g.awayConf ? ` · ${g.awayConf} @ ${g.homeConf}` : ""}</div>
+          </div>
+        </label>
+      );
+    }
+
+    function SelectedPanel({ onUse }) {
+      return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+          <div className="cfb-mono text-xs font-bold uppercase px-3 py-2" style={{ color: COLORS.goldBright, borderBottom: `1px solid ${COLORS.line}` }}>
+            {totalSelected > 0 ? `${totalSelected} selected · sorted by kickoff` : "no games selected yet"}
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "6px" }}>
+            {selectedGamesList.length === 0 ? (
+              <div className="cfb-mono text-xs text-center py-6" style={{ color: COLORS.muted }}>Check a game on the left</div>
+            ) : selectedGamesList.map((g) => {
+              const awayAbbr = g.awayAbbr || teamAbbrev(g.away);
+              const homeAbbr = g.homeAbbr || teamAbbrev(g.home);
+              const favAbbr = g.favorite === "home" ? homeAbbr : awayAbbr;
+              return (
+                <div key={g._idx} className="cfb-mono" style={{ background: COLORS.fieldMid, border: `1px solid ${COLORS.line}`, padding: "8px 10px", marginBottom: 4 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}>{g.awayColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.awayColor, flexShrink: 0, display: "inline-block" }} />}<span style={{ fontSize: "0.78rem", fontWeight: 600, color: COLORS.chalk }}>{awayAbbr}</span></div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}><span style={{ fontSize: "0.62rem", color: COLORS.muted, width: 8, textAlign: "center" }}>@</span>{g.homeColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.homeColor, flexShrink: 0, display: "inline-block" }} />}<span style={{ fontSize: "0.78rem", fontWeight: 600, color: COLORS.chalk }}>{homeAbbr}</span></div>
+                      {g.kickoffTime && <div style={{ fontSize: "0.62rem", color: COLORS.muted, marginTop: 2 }}>{g.kickoffTime}</div>}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                      {g.spread ? <div><span style={{ fontSize: "0.6rem", color: COLORS.muted }}>{favAbbr} </span><span style={{ fontSize: "0.78rem", fontWeight: 700, color: COLORS.goldBright }}>-{g.spread}</span></div> : null}
+                      <button onClick={() => setImportSelected((s) => ({ ...s, [g._idx]: false }))} style={{ color: COLORS.muted, fontSize: "0.9rem", lineHeight: 1 }}>✕</button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="px-3 py-2 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+            {totalSelected > 0 && <button onClick={() => setImportSelected({})} className="cfb-mono text-xs w-full py-1.5" style={{ color: COLORS.muted, border: `1px solid ${COLORS.lineStrong}` }}>clear all</button>}
+            <PrimaryButton full onClick={onUse} disabled={totalSelected === 0}>Use these {totalSelected} game{totalSelected === 1 ? "" : "s"}</PrimaryButton>
+          </div>
+        </div>
+      );
+    }
+
+    function SectionList({ q: sq, visibleSecs }) {
+      return (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }} className="cfb-mono text-xs px-2 py-1" style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}>select all</button>
+            <button onClick={() => setImportSelected({})} className="cfb-mono text-xs px-2 py-1" style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>clear all</button>
+            <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{sq ? `${visibleSecs.reduce((n, s) => n + s.games.length, 0)} result${visibleSecs.reduce((n,s)=>n+s.games.length,0)===1?"":"s"}` : `${totalGames} available`}</span>
+          </div>
+          {sq && visibleSecs.length === 0 && <div className="cfb-mono text-xs text-center py-4" style={{ color: COLORS.muted }}>No games match "{sq}"</div>}
+          {visibleSecs.map((section) => {
+            const idxs = section.games.map((g) => g._idx);
+            const sel = idxs.filter((i) => importSelected[i]).length;
+            const allOn = sel === idxs.length;
+            const expanded = sq ? true : expandedSections.has(section.label);
+            return (
+              <div key={section.label}>
+                <div className="flex items-center justify-between px-2 py-1.5 mb-1 cursor-pointer"
+                  style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
+                  onClick={() => { if (sq) return; setExpandedSections((p) => { const n = new Set(p); n.has(section.label) ? n.delete(section.label) : n.add(section.label); return n; }); }}>
+                  <span className="cfb-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2" style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
+                    {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                    {section.label === "Top 25" ? "🏆 Top 25" : section.label}
+                    <span className="font-normal" style={{ color: COLORS.muted }}>{sel}/{section.games.length}</span>
+                  </span>
+                  <button onClick={(e) => { e.stopPropagation(); const p = {}; idxs.forEach((i) => (p[i] = !allOn)); setImportSelected((s) => ({ ...s, ...p })); }}
+                    className="cfb-mono text-xs px-2 py-0.5" style={{ border: `1px solid ${COLORS.lineStrong}`, color: allOn ? COLORS.muted : COLORS.goldBright }}>
+                    {allOn ? "deselect" : sel > 0 ? "select rest" : "select all"}
+                  </button>
+                </div>
+                {expanded && <div className="space-y-1">{section.games.map((g) => <SectionGameRow key={g._idx} g={g} />)}</div>}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // Mobile: auto-open sheet on first selection
+    const mobileSheet = showMobileSheet && (
+      <>
+        <div onClick={() => setShowMobileSheet(false)} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)" }} />
+        <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 61, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.lineStrong}`, borderRadius: "14px 14px 0 0", maxHeight: "65vh", display: "flex", flexDirection: "column" }}>
+          <div style={{ width: 36, height: 4, borderRadius: 2, background: COLORS.lineStrong, margin: "10px auto 4px" }} />
+          <div style={{ flex: 1, minHeight: 0 }}><SelectedPanel onUse={() => { setShowMobileSheet(false); applyImportSelection(); }} /></div>
+        </div>
+      </>
+    );
+
+    return (
+      <>
+        {mobileSheet}
+        {isDesktop ? (
+          <div style={{ display: "flex", height: "calc(100vh - 380px)", minHeight: 380, maxHeight: 720, border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)" }}>
+            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", borderRight: `1px solid ${COLORS.lineStrong}` }}>
+              <div style={{ flexShrink: 0, padding: "10px 12px", borderBottom: `1px solid ${COLORS.line}` }}>{searchInput}</div>
+              <div style={{ flex: 1, overflowY: "auto", padding: 12 }}><SectionList q={q} visibleSecs={visibleSections} /></div>
+            </div>
+            <div style={{ width: 280, flexShrink: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <SelectedPanel onUse={applyImportSelection} />
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.06)", padding: "8px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <span className="cfb-mono text-sm font-bold" style={{ color: totalSelected > 0 ? COLORS.goldBright : COLORS.chalkDim }}>{totalSelected} <span className="font-normal text-xs" style={{ color: COLORS.chalkDim }}>/ {totalGames} selected</span></span>
+              {totalSelected > 0 && <button onClick={() => setShowMobileSheet(true)} className="cfb-mono text-xs px-3 py-1.5 font-bold" style={{ background: COLORS.gold, color: COLORS.ink, borderRadius: 3 }}>Review ({totalSelected}) →</button>}
+            </div>
+            <div style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)", padding: 12 }}>
+              {searchInput}
+              <SectionList q={q} visibleSecs={visibleSections} />
+            </div>
+          </>
+        )}
+      </>
+    );
+  }
+
   // ── odds api load key on mount ────────────────────────────────────────────
   useEffect(() => {
     (async () => {
@@ -4464,7 +4713,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
       </div>
 
       {/* ── Import preview ── */}
-      {importPreview && <ImportPreviewPanel />}
+      {importPreview && ImportPreviewPanel()}
 
       {/* ── Manual entry (de-emphasized secondary option) ── */}
       <div style={{ borderTop: `1px solid ${COLORS.line}`, paddingTop: 12 }}>
