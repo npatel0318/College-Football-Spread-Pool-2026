@@ -17,6 +17,7 @@ import {
   LogOut,
   AlertCircle,
   ChevronRight,
+  ChevronLeft,
   Upload,
   ChevronDown,
   ChevronUp,
@@ -4103,7 +4104,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const [importError, setImportError] = useState(null);
   const [importPreview, setImportPreview] = useState(null);
   const [importSelected, setImportSelected] = useState({});
-  const [confirmDeleteWeek, setConfirmDeleteWeek] = useState(null); // week num pending delete
+  const [confirmingGames, setConfirmingGames] = useState(null); // games pending confirmation modal  const [confirmDeleteWeek, setConfirmDeleteWeek] = useState(null); // week num pending delete
 
   const [cfbdOpen, setCfbdOpen] = useState(false);
   const [cfbdKeyInput, setCfbdKeyInput] = useState("");
@@ -4192,8 +4193,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     prevTotalRef.current = totalSelected;
   }, [totalSelected, isDesktop]);
 
-  const [shareMessage, setShareMessage] = useState("");
-  const [shareCopied, setShareCopied] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -4554,8 +4553,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     const chosen = importPreview.filter((_, i) => importSelected[i]);
     if (!chosen.length) return;
 
-    // Sort by kickoff time. Times look like "Thu 9:00 PM CT", "Sat 11:00 AM CT".
-    // Parse the day + time into a sortable number.
     const DAY_ORDER = { thu: 0, fri: 1, sat: 2, sun: 3, mon: 4, tue: 5, wed: 6 };
     function kickoffSortKey(t) {
       if (!t) return 9999;
@@ -4576,16 +4573,24 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
       (a, b) => kickoffSortKey(a.kickoffTime) - kickoffSortKey(b.kickoffTime)
     );
 
-    setGames(
+    // Show confirmation modal instead of immediately going to the editor
+    setConfirmingGames(
       sorted.map((g) => ({
-        ...g,                          // preserve ALL enriched fields (logos, colors, abbrevs, rank, neutral, conf…)
-        id: newId(),                   // fresh id for this week's copy
-        spread: String(g.spread),     // normalize spread to string for the editor
+        ...g,
+        id: newId(),
+        spread: String(g.spread),
       }))
     );
+  }
+
+  function handleConfirmGames() {
+    if (!confirmingGames) return;
+    setGames(confirmingGames);
     setImportPreview(null);
     setImportText("");
     setImportOpen(false);
+    setImportSelected({});
+    setConfirmingGames(null);
   }
 
   const valid =
@@ -4596,18 +4601,91 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
 
   const currentWeekData = selectedWeek != null ? weekCache[selectedWeek] : null;
 
-  useEffect(() => {
-    if (selectedWeek != null && currentWeekData) {
-      const url = typeof window !== "undefined" ? window.location.origin + window.location.pathname : "";
-      setShareMessage(
-        `🏈 Week ${selectedWeek} picks are live! ${currentWeekData.games.length} games to pick — get your picks in before kickoff.\n${url}`
-      );
-      setShareCopied(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedWeek, currentWeekData?.games?.length]);
-
   return (
+    <>
+      {/* ── Game selection confirmation modal ── */}
+      {confirmingGames && (
+        <>
+          <div onClick={() => setConfirmingGames(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.65)" }} />
+          <div style={{
+            position: "fixed", zIndex: 201,
+            top: "50%", left: "50%", transform: "translate(-50%,-50%)",
+            width: "min(92vw, 680px)", maxHeight: "80vh",
+            background: COLORS.fieldDark, border: `1px solid ${COLORS.lineStrong}`,
+            display: "flex", flexDirection: "column", borderRadius: 4,
+          }}>
+            {/* Header */}
+            <div className="cfb-mono flex items-center justify-between px-5 py-4"
+              style={{ borderBottom: `1px solid ${COLORS.line}`, flexShrink: 0 }}>
+              <div>
+                <div className="font-bold uppercase tracking-wider"
+                  style={{ color: COLORS.goldBright, fontSize: "0.85rem" }}>
+                  Week {weekNumInput} — {confirmingGames.length} game{confirmingGames.length === 1 ? "" : "s"}
+                </div>
+                <div style={{ fontSize: "0.7rem", color: COLORS.muted, marginTop: 2 }}>
+                  Review before adding to the pool
+                </div>
+              </div>
+              <button onClick={() => setConfirmingGames(null)} style={{ color: COLORS.muted, fontSize: "1.2rem", lineHeight: 1 }}>✕</button>
+            </div>
+
+            {/* Game cards — scrollable, same dot+abbrev format as picks screen */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
+                {confirmingGames.map((g, idx) => {
+                  const awayAbbr = g.awayAbbr || teamAbbrev(g.away);
+                  const homeAbbr = g.homeAbbr || teamAbbrev(g.home);
+                  const favAbbr  = g.favorite === "home" ? homeAbbr : awayAbbr;
+                  return (
+                    <div key={idx} className="cfb-mono"
+                      style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep, padding: "10px 12px", borderRadius: 3 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}>
+                            {g.awayColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.awayColor, flexShrink: 0, display: "inline-block" }} />}
+                            <span style={{ fontSize: "0.8rem", fontWeight: 600, color: COLORS.chalk }}>{awayAbbr}</span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}>
+                            <span style={{ fontSize: "0.62rem", color: COLORS.muted, width: 8, textAlign: "center" }}>@</span>
+                            {g.homeColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.homeColor, flexShrink: 0, display: "inline-block" }} />}
+                            <span style={{ fontSize: "0.8rem", fontWeight: 600, color: COLORS.chalk }}>{homeAbbr}</span>
+                          </div>
+                          <div style={{ fontSize: "0.62rem", color: COLORS.muted, marginTop: 3 }}>
+                            {[g.kickoffTime, g.network].filter(Boolean).join(" · ")}
+                          </div>
+                        </div>
+                        {g.spread && (
+                          <div style={{ textAlign: "right", paddingTop: 2 }}>
+                            <span style={{ fontSize: "0.62rem", color: COLORS.muted }}>{favAbbr} </span>
+                            <span style={{ fontSize: "0.85rem", fontWeight: 700, color: COLORS.goldBright }}>-{g.spread}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between px-5 py-4 gap-3"
+              style={{ borderTop: `1px solid ${COLORS.line}`, flexShrink: 0 }}>
+              <button onClick={() => setConfirmingGames(null)}
+                className="cfb-mono cfb-btn text-sm px-4 py-2.5 flex items-center gap-1.5"
+                style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}>
+                <ChevronLeft size={14} /> Back to selection
+              </button>
+              <PrimaryButton onClick={handleConfirmGames}>
+                <span className="flex items-center gap-1.5">
+                  <CheckCircle2 size={14} /> Confirm — add to Week {weekNumInput}
+                </span>
+              </PrimaryButton>
+            </div>
+          </div>
+        </>
+      )}
+
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
         <SecondaryButton onClick={startNew} disabled={selectedWeek === null}>
@@ -4685,43 +4763,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
               ? "picks hidden until kickoff — click to make visible"
               : "picks visible — click to hide until kickoff"}
           </button>
-        </div>
-      )}
-
-      {selectedWeek != null && currentWeekData && (
-        <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
-          <div className="cfb-mono text-xs uppercase tracking-wider mb-2 flex items-center gap-1.5" style={{ color: COLORS.goldBright }}>
-            <Send size={13} /> Share this week
-          </div>
-          <textarea
-            value={shareMessage}
-            onChange={(e) => {
-              setShareMessage(e.target.value);
-              setShareCopied(false);
-            }}
-            rows={4}
-            className="cfb-mono text-base sm:text-xs w-full p-2"
-            style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
-          />
-          <div className="mt-2">
-            <SecondaryButton
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(shareMessage);
-                  setShareCopied(true);
-                } catch (e) {
-                  setShareCopied(false);
-                }
-              }}
-            >
-              <span className="flex items-center gap-1.5">
-                <Copy size={12} /> {shareCopied ? "Copied!" : "Copy message"}
-              </span>
-            </SecondaryButton>
-          </div>
-          <div className="text-xs mt-2" style={{ color: COLORS.muted }}>
-            Edit the wording if you want, then paste it into your group text.
-          </div>
         </div>
       )}
 
@@ -5336,6 +5377,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         </PrimaryButton>
       </div>
     </div>
+    </>
   );
 }
 
