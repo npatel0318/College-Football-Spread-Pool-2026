@@ -4094,62 +4094,52 @@ function emptyGame() {
 
 function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly, toggleHidePicksUntilKickoff, deleteWeek }) {
   const nextWeekNum = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) + 1 : 1;
-  const [selectedWeek, setSelectedWeek] = useState(null); // null = new week
-  const [games, setGames] = useState(Array.from({ length: 10 }, emptyGame));
+  const defaultYear = new Date().getFullYear();
+
+  // Core state
+  const [selectedWeek, setSelectedWeek] = useState(null);
+  const [games, setGames] = useState([]);
   const [weekNumInput, setWeekNumInput] = useState(String(nextWeekNum));
   const [busy, setBusy] = useState(false);
   const [loadedExisting, setLoadedExisting] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [importText, setImportText] = useState("");
-  const [importError, setImportError] = useState(null);
+  const [confirmDeleteWeek, setConfirmDeleteWeek] = useState(null);
+
+  // Wizard: null = not in wizard, 1/2/3 = step
+  const [wizardStep, setWizardStep] = useState(null);
+
+  // Step 2 — import from Odds API
   const [importPreview, setImportPreview] = useState(null);
   const [importSelected, setImportSelected] = useState({});
-  const [confirmingGames, setConfirmingGames] = useState(null); // games pending confirmation modal  const [confirmDeleteWeek, setConfirmDeleteWeek] = useState(null); // week num pending delete
-
-  const [cfbdOpen, setCfbdOpen] = useState(false);
-  const [cfbdKeyInput, setCfbdKeyInput] = useState("");
-  const [cfbdKeySaved, setCfbdKeySaved] = useState(false);
-  const [cfbdKeyLoading, setCfbdKeyLoading] = useState(true);
-  const [cfbdYear, setCfbdYear] = useState(String(defaultCfbdSeasonYear()));
-  const [cfbdWeek, setCfbdWeek] = useState(String(nextWeekNum));
-  const [cfbdSeasonType, setCfbdSeasonType] = useState("regular");
-  const [cfbdTop25Only, setCfbdTop25Only] = useState(true);
-  const [cfbdConferences, setCfbdConferences] = useState("");
-  const [cfbdBusy, setCfbdBusy] = useState(false);
-  const [cfbdError, setCfbdError] = useState(null);
-
-  const [oddsOpen, setOddsOpen] = useState(false);
+  const [confirmingGames, setConfirmingGames] = useState(null);
+  const [showAdvancedOdds, setShowAdvancedOdds] = useState(false); // year/week override
   const [oddsKeyInput, setOddsKeyInput] = useState("");
   const [oddsKeySaved, setOddsKeySaved] = useState(false);
   const [oddsKeyLoading, setOddsKeyLoading] = useState(true);
-  // Week picker — replaces manual date-range inputs
-  const defaultYear = new Date().getFullYear();
   const [oddsYear, setOddsYear] = useState(defaultYear);
-  const [oddsWeek, setOddsWeek] = useState(nextWeekNum || 1);
+  const [oddsWeek, setOddsWeek] = useState(nextWeekNum);
   const [oddsShowCustomRange, setOddsShowCustomRange] = useState(false);
   const [oddsFrom, setOddsFrom] = useState(isoDateInput(new Date()));
   const [oddsTo, setOddsTo] = useState(isoDateInput(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)));
-  const [oddsBusy, setOddsBusy] = useState(false);
-  const [oddsError, setOddsError] = useState(null);
   const [weekDatesFrom, setWeekDatesFrom] = useState("");
   const [weekDatesTo, setWeekDatesTo] = useState("");
+  const [oddsBusy, setOddsBusy] = useState(false);
+  const [oddsError, setOddsError] = useState(null);
 
-  // Responsive layout detection — desktop gets a split panel, mobile gets a bottom sheet
-  const [isDesktop, setIsDesktop] = useState(
-    typeof window !== "undefined" && window.innerWidth >= 768
-  );
+  // Step 2 — manual entry (within wizard; starts empty)
+  const [showManualEntry, setShowManualEntry] = useState(false);
+
+  // Responsive layout
+  const [isDesktop, setIsDesktop] = useState(typeof window !== "undefined" && window.innerWidth >= 768);
+  const [expandedSections, setExpandedSections] = useState(new Set(["Top 25"]));
+  const [showMobileSheet, setShowMobileSheet] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+
   useEffect(() => {
     const handler = () => setIsDesktop(window.innerWidth >= 768);
     window.addEventListener("resize", handler);
     return () => window.removeEventListener("resize", handler);
   }, []);
 
-  // Import preview state
-  const [expandedSections, setExpandedSections] = useState(new Set(["Top 25"]));
-  const [showMobileSheet, setShowMobileSheet] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-
-  // Reset sections, sheet, and search when a fresh preview loads
   useEffect(() => {
     if (importPreview) {
       setExpandedSections(new Set(["Top 25"]));
@@ -4479,13 +4469,28 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   function startNew() {
     setSelectedWeek(null);
     setLoadedExisting(false);
-    setGames(Array.from({ length: 10 }, emptyGame));
+    setGames([]);
     setWeekNumInput(String(nextWeekNum));
+    setImportPreview(null);
+    setImportSelected({});
+    setConfirmingGames(null);
+    setShowManualEntry(false);
+    setWizardStep(1);
+  }
+
+  function exitWizard() {
+    setWizardStep(null);
+    setImportPreview(null);
+    setImportSelected({});
+    setConfirmingGames(null);
+    setGames([]);
+    setShowManualEntry(false);
   }
 
   function startEdit(w) {
     setLoadedExisting(false);
     setSelectedWeek(w);
+    setWizardStep(null);
   }
 
   function updateGame(idx, patch) {
@@ -4513,41 +4518,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     setGames((prev) => prev.filter((_, i) => i !== idx));
   }
 
-  function handleParseImport() {
-    setImportError(null);
-    setImportPreview(null);
-    let data;
-    try {
-      data = JSON.parse(importText);
-    } catch (e) {
-      setImportError("That doesn't look like valid JSON. Make sure you copied the whole list, brackets included.");
-      return;
-    }
-    if (!Array.isArray(data)) {
-      setImportError("Expected a JSON array of games, e.g. [ {...}, {...} ].");
-      return;
-    }
-    try {
-      const cleaned = data.map((g, i) => {
-        if (!g.away || !g.home || g.spread == null || isNaN(Number(g.spread))) {
-          throw new Error(`Entry ${i + 1} is missing an away team, home team, or numeric spread.`);
-        }
-        return {
-          away: String(g.away),
-          home: String(g.home),
-          favorite: g.favorite === "away" ? "away" : "home",
-          spread: Number(g.spread),
-          conference: g.conference || g.away_conference || g.home_conference || "",
-          awayRank: g.awayRank ?? g.away_rank ?? null,
-          homeRank: g.homeRank ?? g.home_rank ?? null,
-        };
-      });
-      setImportPreview(cleaned);
-      setImportSelected({});
-    } catch (e) {
-      setImportError(e.message);
-    }
-  }
 
   function applyImportSelection() {
     const chosen = importPreview.filter((_, i) => importSelected[i]);
@@ -4587,10 +4557,10 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     if (!confirmingGames) return;
     setGames(confirmingGames);
     setImportPreview(null);
-    setImportText("");
-    setImportOpen(false);
     setImportSelected({});
     setConfirmingGames(null);
+    setShowManualEntry(false);
+    if (wizardStep === 2) setWizardStep(3);
   }
 
   const valid =
@@ -4600,6 +4570,213 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     games.every((g) => g.away.trim() && g.home.trim() && g.spread !== "" && !isNaN(Number(g.spread)));
 
   const currentWeekData = selectedWeek != null ? weekCache[selectedWeek] : null;
+
+  // Step indicator for wizard mode
+  function StepBar({ step }) {
+    const STEPS = [{ n: 1, label: "Week" }, { n: 2, label: "Select games" }, { n: 3, label: "Save" }];
+    return (
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 20 }}>
+        {STEPS.map((s, i) => (
+          <React.Fragment key={s.n}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              <div style={{
+                width: 24, height: 24, borderRadius: "50%",
+                background: step > s.n ? COLORS.gold : step === s.n ? "rgba(217,164,65,0.15)" : COLORS.fieldDeep,
+                border: `1px solid ${step > s.n ? COLORS.gold : step === s.n ? COLORS.gold : COLORS.lineStrong}`,
+                color: step > s.n ? COLORS.ink : step === s.n ? COLORS.goldBright : COLORS.muted,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: "0.7rem", fontWeight: 700, fontFamily: "var(--font-mono)", flexShrink: 0,
+              }}>
+                {step > s.n ? "✓" : s.n}
+              </div>
+              <span className="cfb-mono" style={{
+                fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em",
+                color: step === s.n ? COLORS.goldBright : step > s.n ? COLORS.muted : "#444",
+              }}>
+                {s.label}
+              </span>
+            </div>
+            {i < STEPS.length - 1 && (
+              <div style={{ flex: 1, height: 1, background: COLORS.line, margin: "0 10px" }} />
+            )}
+          </React.Fragment>
+        ))}
+      </div>
+    );
+  }
+
+  // Step 1: set week number
+  function Step1() {
+    return (
+      <div className="space-y-6 cfb-fade-in" style={{ maxWidth: 360 }}>
+        <div>
+          <div className="cfb-mono text-xs uppercase tracking-wider mb-2" style={{ color: COLORS.chalkDim }}>Week number</div>
+          <input
+            type="number"
+            value={weekNumInput}
+            onChange={(e) => setWeekNumInput(e.target.value)}
+            style={{
+              width: "100%", background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}`,
+              color: COLORS.chalk, padding: "10px 12px", fontSize: "1.5rem",
+              fontFamily: "var(--font-mono)", fontWeight: 700,
+            }}
+          />
+          <div className="cfb-mono text-xs mt-1" style={{ color: COLORS.muted }}>
+            Auto-set to {nextWeekNum} — change if needed
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <PrimaryButton onClick={() => setWizardStep(2)} disabled={!weekNumInput.trim() || isNaN(Number(weekNumInput))}>
+            <span className="flex items-center gap-1.5">Next — select games <ChevronRight size={14} /></span>
+          </PrimaryButton>
+          <button onClick={exitWizard} className="cfb-mono text-xs" style={{ color: COLORS.muted }}>Cancel</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Step 2: fetch from Odds API (when no preview yet) or browse the import panel (when preview ready)
+  function Step2() {
+    if (importPreview) {
+      return <Step2Preview />;
+    }
+    return (
+      <div className="space-y-5 cfb-fade-in">
+        {/* Primary: Odds API fetch */}
+        <div>
+          {/* API key (collapsed after saved) */}
+          {!oddsKeySaved && (
+            <div className="space-y-2 mb-4">
+              <div className="cfb-mono text-xs uppercase tracking-wider" style={{ color: COLORS.chalkDim }}>Odds API key</div>
+              <div className="flex gap-2">
+                <FieldInput
+                  type="password"
+                  value={oddsKeyInput}
+                  onChange={setOddsKeyInput}
+                  placeholder="Paste your key"
+                />
+                <SecondaryButton
+                  disabled={!oddsKeyInput.trim()}
+                  onClick={async () => {
+                    await storage.set("odds-api-key", oddsKeyInput.trim(), false).catch(() => null);
+                    setOddsKeySaved(true);
+                  }}
+                >Save</SecondaryButton>
+              </div>
+            </div>
+          )}
+
+          {/* Year/week — show advanced toggle if not already showing */}
+          {showAdvancedOdds ? (
+            <div className="space-y-3 mb-4">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>Year</div>
+                  <select value={oddsYear} onChange={(e) => setOddsYear(Number(e.target.value))}
+                    style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}>
+                    {[defaultYear - 1, defaultYear, defaultYear + 1].map((y) => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>Week</div>
+                  <select value={oddsWeek} onChange={(e) => setOddsWeek(Number(e.target.value))}
+                    style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}>
+                    {Array.from({ length: 16 }, (_, i) => i + 1).map((w) => <option key={w} value={w}>Week {w}</option>)}
+                  </select>
+                </div>
+              </div>
+              {oddsShowCustomRange && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>From</div>
+                    <FieldInput type="date" value={oddsFrom} onChange={setOddsFrom} />
+                  </div>
+                  <div>
+                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>To</div>
+                    <FieldInput type="date" value={oddsTo} onChange={setOddsTo} />
+                  </div>
+                </div>
+              )}
+              <button onClick={() => setOddsShowCustomRange((v) => !v)} className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.muted }}>
+                {oddsShowCustomRange ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                {oddsShowCustomRange ? "hide custom date range" : "use custom date range (bowls / playoffs)"}
+              </button>
+            </div>
+          ) : (
+            <div className="cfb-mono text-xs mb-4 flex items-center gap-2" style={{ color: COLORS.muted }}>
+              <span style={{ color: COLORS.chalkDim }}>{oddsYear} · Week {oddsWeek}</span>
+              <button onClick={() => setShowAdvancedOdds(true)} style={{ color: COLORS.goldBright, textDecoration: "underline", fontSize: "0.7rem" }}>
+                change
+              </button>
+            </div>
+          )}
+
+          {oddsError && <div className="mb-3"><Banner onDismiss={() => setOddsError(null)}>{oddsError}</Banner></div>}
+
+          <PrimaryButton full onClick={fetchOddsApiWeek} disabled={oddsBusy}>
+            {oddsBusy ? "Fetching…" : `Fetch Week ${oddsWeek} games →`}
+          </PrimaryButton>
+        </div>
+
+        {/* Divider + manual entry */}
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "4px 0" }}>
+            <div style={{ flex: 1, height: 1, background: COLORS.line }} />
+            <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>or</span>
+            <div style={{ flex: 1, height: 1, background: COLORS.line }} />
+          </div>
+          {!showManualEntry ? (
+            <button onClick={() => setShowManualEntry(true)}
+              className="cfb-mono text-xs w-full text-center mt-3"
+              style={{ color: COLORS.chalkDim }}>
+              Enter games manually
+            </button>
+          ) : (
+            <div className="space-y-2 mt-3">
+              <div className="cfb-mono text-xs uppercase tracking-wider" style={{ color: COLORS.chalkDim }}>Manual games</div>
+              {games.map((g, idx) => (
+                <GameEditorRow key={g.id} g={g} idx={idx} updateGame={updateGame} removeRow={removeRow} />
+              ))}
+              <div className="flex items-center gap-3">
+                <SecondaryButton onClick={addRow}>
+                  <span className="flex items-center gap-1"><Plus size={12} /> Add game</span>
+                </SecondaryButton>
+                {games.length > 0 && games.some((g) => g.away.trim() && g.home.trim()) && (
+                  <PrimaryButton onClick={() => setWizardStep(3)}>
+                    <span className="flex items-center gap-1.5">Review {games.length} game{games.length === 1 ? "" : "s"} <ChevronRight size={14} /></span>
+                  </PrimaryButton>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <button onClick={exitWizard} className="cfb-mono text-xs" style={{ color: COLORS.muted }}>← Cancel</button>
+      </div>
+    );
+  }
+
+  // Step 2 continued: the import preview split-pane
+  function Step2Preview() {
+    return <ImportPreviewPanel />;
+  }
+
+  // Step 3: review game list + save
+  function Step3() {
+    return (
+      <div className="space-y-3 cfb-fade-in">
+        <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+          {games.length} game{games.length === 1 ? "" : "s"} · review and save
+        </div>
+        {games.map((g, idx) => (
+          <GameEditorRow key={g.id} g={g} idx={idx} updateGame={updateGame} removeRow={removeRow} />
+        ))}
+        <SecondaryButton onClick={addRow}>
+          <span className="flex items-center gap-1"><Plus size={12} /> Add game</span>
+        </SecondaryButton>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -4615,7 +4792,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
             background: COLORS.fieldDark, border: `1px solid ${COLORS.lineStrong}`,
             display: "flex", flexDirection: "column", borderRadius: 4,
           }}>
-            {/* Header */}
             <div className="cfb-mono flex items-center justify-between px-5 py-4"
               style={{ borderBottom: `1px solid ${COLORS.line}`, flexShrink: 0 }}>
               <div>
@@ -4623,14 +4799,10 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                   style={{ color: COLORS.goldBright, fontSize: "0.85rem" }}>
                   Week {weekNumInput} — {confirmingGames.length} game{confirmingGames.length === 1 ? "" : "s"}
                 </div>
-                <div style={{ fontSize: "0.7rem", color: COLORS.muted, marginTop: 2 }}>
-                  Review before adding to the pool
-                </div>
+                <div style={{ fontSize: "0.7rem", color: COLORS.muted, marginTop: 2 }}>Review before adding to the pool</div>
               </div>
               <button onClick={() => setConfirmingGames(null)} style={{ color: COLORS.muted, fontSize: "1.2rem", lineHeight: 1 }}>✕</button>
             </div>
-
-            {/* Game cards — scrollable, same dot+abbrev format as picks screen */}
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
                 {confirmingGames.map((g, idx) => {
@@ -4667,8 +4839,6 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                 })}
               </div>
             </div>
-
-            {/* Footer */}
             <div className="flex items-center justify-between px-5 py-4 gap-3"
               style={{ borderTop: `1px solid ${COLORS.line}`, flexShrink: 0 }}>
               <button onClick={() => setConfirmingGames(null)}
@@ -4687,8 +4857,9 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
       )}
 
     <div className="space-y-4">
+      {/* ── Week navigation ── */}
       <div className="flex flex-wrap gap-2">
-        <SecondaryButton onClick={startNew} disabled={selectedWeek === null}>
+        <SecondaryButton onClick={startNew}>
           <span className="flex items-center gap-1"><Plus size={12} /> new week</span>
         </SecondaryButton>
         {leagueMeta.weeks
@@ -4696,7 +4867,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           .sort((a, b) => b - a)
           .map((w) => (
             <div key={w} className="flex items-center gap-1">
-              <SecondaryButton onClick={() => startEdit(w)} disabled={selectedWeek === w}>
+              <SecondaryButton onClick={() => startEdit(w)} disabled={selectedWeek === w && !wizardStep}>
                 edit wk {w}
               </SecondaryButton>
               {confirmDeleteWeek === w ? (
@@ -4708,678 +4879,182 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                       await deleteWeek(w);
                     }}
                     className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2"
-                    style={{ background: "rgba(179,55,42,0.22)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}
-                  >
-                    confirm delete
-                  </button>
-                  <button
-                    onClick={() => setConfirmDeleteWeek(null)}
+                    style={{ background: "rgba(179,55,42,0.2)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}
+                  >yes, delete</button>
+                  <button onClick={() => setConfirmDeleteWeek(null)}
                     className="cfb-mono cfb-btn text-xs px-2.5 py-2"
-                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}
-                  >
-                    cancel
-                  </button>
+                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>cancel</button>
                 </>
               ) : (
-                <button
-                  onClick={() => setConfirmDeleteWeek(w)}
-                  className="cfb-mono cfb-btn text-xs px-2 py-2"
-                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}
-                  title={`Delete week ${w}`}
-                >
-                  <Trash2 size={12} />
+                <button onClick={() => setConfirmDeleteWeek(w)} style={{ color: COLORS.muted }}>
+                  <Trash2 size={14} />
                 </button>
               )}
             </div>
           ))}
       </div>
 
-      {selectedWeek != null && currentWeekData && (
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span style={{ color: COLORS.chalkDim }}>Week {selectedWeek} is currently</span>
-          <button
-            onClick={() => toggleLock(selectedWeek)}
-            className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2 flex items-center gap-1"
-            style={{
-              background: currentWeekData.locked ? "rgba(179,55,42,0.16)" : "rgba(217,164,65,0.16)",
-              border: `1px solid ${currentWeekData.locked ? COLORS.red : COLORS.gold}`,
-              color: currentWeekData.locked ? COLORS.redBright : COLORS.goldBright,
-            }}
-          >
-            {currentWeekData.locked ? <Lock size={12} /> : <Unlock size={12} />}
-            {currentWeekData.locked ? "locked — click to open" : "open — click to lock"}
-          </button>
-          <button
-            onClick={() => toggleHidePicksUntilKickoff(selectedWeek)}
-            className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2 flex items-center gap-1"
-            style={{
-              background: currentWeekData.hidePicksUntilKickoff ? "rgba(217,164,65,0.16)" : "transparent",
-              border: `1px solid ${currentWeekData.hidePicksUntilKickoff ? COLORS.gold : COLORS.lineStrong}`,
-              color: currentWeekData.hidePicksUntilKickoff ? COLORS.goldBright : COLORS.chalkDim,
-            }}
-          >
-            <Eye size={12} />
-            {currentWeekData.hidePicksUntilKickoff
-              ? "picks hidden until kickoff — click to make visible"
-              : "picks visible — click to hide until kickoff"}
-          </button>
-        </div>
-      )}
-
-      <div>
-        <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>
-          Week number
-        </div>
-        <div style={{ maxWidth: 120 }}>
-          <FieldInput
-            type="number"
-            value={weekNumInput}
-            onChange={setWeekNumInput}
-            disabled={selectedWeek != null}
-          />
-        </div>
-      </div>
-
-
-      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
-        <button
-          onClick={() => setOddsOpen((o) => !o)}
-          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5 w-full"
-          style={{ color: COLORS.goldBright }}
-        >
-          <TrendingUp size={13} /> Pull from The Odds API
-          <span className="flex-1" />
-          {oddsOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-        </button>
-
-        {oddsOpen && (
-          <div className="mt-3 space-y-3">
-            <div className="text-xs" style={{ color: COLORS.chalkDim }}>
-              No Top 25 or conference data from this source — it returns whatever games sportsbooks have posted
-              lines for in your date range. You'll pick which ones to use from the list below.
-            </div>
-            {oddsKeyLoading ? (
-              <Spinner label="Checking for a saved key..." />
-            ) : !oddsKeySaved ? (
-              <div className="space-y-2">
-                <div className="text-xs" style={{ color: COLORS.chalkDim }}>
-                  Paste your The Odds API key. It's saved only on this device, never shared with the rest of the
-                  pool, and never stored in the app's code.
-                </div>
-                <FieldInput type="password" value={oddsKeyInput} onChange={setOddsKeyInput} placeholder="Odds API key" />
-                <SecondaryButton onClick={saveOddsKey} disabled={!oddsKeyInput.trim()}>
-                  Save key on this device
-                </SecondaryButton>
+      {/* ── Wizard (new week creation) ── */}
+      {wizardStep ? (
+        <div className="cfb-fade-in">
+          <StepBar step={wizardStep} />
+          {wizardStep === 1 && <Step1 />}
+          {wizardStep === 2 && <Step2 />}
+          {wizardStep === 3 && (
+            <div className="space-y-3 cfb-fade-in">
+              <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                {games.length} game{games.length === 1 ? "" : "s"} · review and save
               </div>
-            ) : (
-              <>
-                <div className="flex items-center justify-between text-xs" style={{ color: COLORS.chalkDim }}>
-                  <span>Key saved on this device.</span>
-                  <button onClick={clearOddsKey} className="opacity-70 hover:opacity-100">
-                    remove key
-                  </button>
-                </div>
-                {/* ── Week picker ── */}
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>year</div>
-                    <select
-                      value={oddsYear}
-                      onChange={(e) => setOddsYear(Number(e.target.value))}
-                      style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}
-                    >
-                      {[defaultYear - 1, defaultYear, defaultYear + 1].map((y) => (
-                        <option key={y} value={y}>{y}</option>
-                      ))}
-                    </select>
+              {games.map((g, idx) => (
+                <div key={g.id} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>game {String(idx + 1).padStart(2, "0")}</span>
+                    {games.length > 1 && (
+                      <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}><Trash2 size={14} /></button>
+                    )}
                   </div>
-                  <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>week</div>
-                    <select
-                      value={oddsWeek}
-                      onChange={(e) => setOddsWeek(Number(e.target.value))}
-                      style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}
-                    >
-                      {Array.from({ length: 16 }, (_, i) => i + 1).map((w) => (
-                        <option key={w} value={w}>Week {w}</option>
-                      ))}
-                    </select>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <FieldInput value={g.away} onChange={(v) => updateGame(idx, { away: v })} placeholder="Away team" />
+                    <FieldInput value={g.home} onChange={(v) => updateGame(idx, { home: v })} placeholder="Home team" />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 grid grid-cols-2 gap-1">
+                      <button onClick={() => updateGame(idx, { favorite: "away" })} className="cfb-mono text-xs px-2 py-2"
+                        style={{ background: g.favorite === "away" ? COLORS.gold : "transparent", color: g.favorite === "away" ? COLORS.ink : COLORS.chalkDim, border: `1px solid ${COLORS.lineStrong}` }}>
+                        fav: {g.away || "away"}
+                      </button>
+                      <button onClick={() => updateGame(idx, { favorite: "home" })} className="cfb-mono text-xs px-2 py-2"
+                        style={{ background: g.favorite === "home" ? COLORS.gold : "transparent", color: g.favorite === "home" ? COLORS.ink : COLORS.chalkDim, border: `1px solid ${COLORS.lineStrong}` }}>
+                        fav: {g.home || "home"}
+                      </button>
+                    </div>
+                    <div style={{ width: 84, flexShrink: 0 }}>
+                      <FieldInput type="number" value={g.spread} onChange={(v) => updateGame(idx, { spread: v })} placeholder="spread" />
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <FieldInput value={g.kickoffTime || ""} onChange={(v) => updateGame(idx, { kickoffTime: v })} placeholder="Kickoff (e.g. Sat 11:00 AM CT)" />
+                    <button onClick={() => updateGame(idx, { neutral: !g.neutral })}
+                      className="cfb-mono text-xs px-2.5 py-2 flex-shrink-0 flex items-center gap-1.5"
+                      style={{ background: g.neutral ? "rgba(217,164,65,0.12)" : "transparent", border: `1px solid ${g.neutral ? COLORS.gold : COLORS.lineStrong}`, color: g.neutral ? COLORS.goldBright : COLORS.muted, whiteSpace: "nowrap" }}>
+                      ⚑ {g.neutral ? "neutral" : "@ site"}
+                    </button>
+                  </div>
+                  <div className="mt-1.5">
+                    <FieldInput value={g.network || ""} onChange={(v) => updateGame(idx, { network: v })} placeholder="Network (e.g. ABC, ESPN)" />
                   </div>
                 </div>
-
-                {/* Custom date range toggle (for bowls / edge cases) */}
-                <button
-                  onClick={() => setOddsShowCustomRange((v) => !v)}
-                  className="cfb-mono text-xs flex items-center gap-1"
-                  style={{ color: COLORS.muted }}
+              ))}
+              <SecondaryButton onClick={addRow}>
+                <span className="flex items-center gap-1"><Plus size={12} /> add game</span>
+              </SecondaryButton>
+              <div style={{ position: "sticky", bottom: 0, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.line}`, paddingTop: 12, paddingBottom: 16, marginTop: 8, zIndex: 10 }}>
+                <PrimaryButton full disabled={!valid || busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    const wk = Number(weekNumInput);
+                    const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
+                    const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
+                    const ok = await saveWeekGames(wk, cleanGames, false, weekDates);
+                    setBusy(false);
+                    if (ok) { setSelectedWeek(wk); if (wizardStep) setWizardStep(null); }
+                  }}
                 >
-                  {oddsShowCustomRange ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-                  {oddsShowCustomRange ? "hide custom date range" : "use custom date range instead (bowls / playoffs)"}
-                </button>
-
-                {oddsShowCustomRange && (
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>from date</div>
-                      <FieldInput type="date" value={oddsFrom} onChange={setOddsFrom} />
-                    </div>
-                    <div>
-                      <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>to date</div>
-                      <FieldInput type="date" value={oddsTo} onChange={setOddsTo} />
-                    </div>
-                  </div>
-                )}
-
-                {oddsError && <Banner onDismiss={() => setOddsError(null)}>{oddsError}</Banner>}
-                <PrimaryButton full onClick={fetchOddsApiWeek} disabled={oddsBusy}>
-                  {oddsBusy
-                    ? "Fetching…"
-                    : oddsShowCustomRange
-                    ? "Fetch games in this range"
-                    : `Fetch ${oddsYear} Week ${oddsWeek} games`}
-                </PrimaryButton>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
-        <button
-          onClick={() => setImportOpen((o) => !o)}
-          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5 w-full"
-          style={{ color: COLORS.goldBright }}
-        >
-          <Upload size={13} /> Paste a list
-          <span className="flex-1" />
-          {importOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-        </button>
-
-        {importOpen && (
-          <div className="mt-3 space-y-2">
-            <div className="text-xs" style={{ color: COLORS.chalkDim }}>
-              Ask me in chat — e.g. "pull this week's Top 25 and SEC spreads" — and I'll hand you a list to paste
-              here. Each entry needs away, home, favorite ("home" or "away"), and spread; conference and rank are
-              optional and just shown as labels below.
-            </div>
-            <textarea
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-              rows={5}
-              className="cfb-mono text-base sm:text-xs w-full p-2"
-              style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
-              placeholder='[{"away":"Michigan","home":"Ohio State","favorite":"home","spread":6.5,"conference":"Big Ten","awayRank":5,"homeRank":2}]'
-            />
-            {importError && (
-              <Banner onDismiss={() => setImportError(null)}>{importError}</Banner>
-            )}
-            <SecondaryButton onClick={handleParseImport} disabled={!importText.trim()}>
-              Preview list
-            </SecondaryButton>
-          </div>
-        )}
-      </div>
-
-      {importPreview && (() => {
-        const CONF_ORDER = ["SEC","Big Ten","Big 12","ACC","Mountain West","Sun Belt","American","MAC","C-USA","Independents"];
-        const indexed = importPreview.map((g, i) => ({ ...g, _idx: i }));
-        const totalGames = indexed.length;
-
-        const top25 = indexed
-          .filter((g) => g.awayRank || g.homeRank)
-          .sort((a, b) =>
-            Math.min(a.awayRank || 99, a.homeRank || 99) -
-            Math.min(b.awayRank || 99, b.homeRank || 99)
-          );
-
-        const confBuckets = {};
-        const NOT_A_CONF = new Set(["FBS", "NCAA", "College Football", "FCS", ""]);
-        indexed.forEach((g) => {
-          const confs = new Set();
-          if (g.homeConf && !NOT_A_CONF.has(g.homeConf)) confs.add(g.homeConf);
-          if (g.awayConf && !NOT_A_CONF.has(g.awayConf)) confs.add(g.awayConf);
-          // Games involving only Independents / unresolved teams fall to Other
-          if (confs.size === 0) confs.add("Other");
-          confs.forEach((conf) => {
-            if (!confBuckets[conf]) confBuckets[conf] = [];
-            confBuckets[conf].push(g);
-          });
-        });
-
-        Object.values(confBuckets).forEach((games) =>
-          games.sort((a, b) =>
-            Math.min(a.awayRank || 99, a.homeRank || 99) -
-            Math.min(b.awayRank || 99, b.homeRank || 99)
-          )
-        );
-
-        const confSorted = Object.keys(confBuckets).sort((a, b) => {
-          const ai = CONF_ORDER.indexOf(a), bi = CONF_ORDER.indexOf(b);
-          if (ai !== -1 && bi !== -1) return ai - bi;
-          if (ai !== -1) return -1; if (bi !== -1) return 1;
-          if (a === "Other") return 1; if (b === "Other") return -1;
-          return a.localeCompare(b);
-        });
-
-        const sections = [
-          ...(top25.length ? [{ label: "Top 25", games: top25 }] : []),
-          ...confSorted.map((c) => ({ label: c, games: confBuckets[c] })),
-        ];
-
-        function SectionGameRow({ g }) {
-          const checked = !!importSelected[g._idx];
-          const favAbbr = g.favorite === "home"
-            ? (g.homeAbbr || teamAbbrev(g.home))
-            : (g.awayAbbr || teamAbbrev(g.away));
-          return (
-            <label
-              className="flex items-start gap-2 px-2 py-2.5 cfb-mono cursor-pointer"
-              style={{
-                background: checked ? "rgba(217,164,65,0.1)" : COLORS.fieldDeep,
-                border: `1px solid ${checked ? COLORS.lineStrong : COLORS.line}`,
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={checked}
-                onChange={() => setImportSelected((s) => ({ ...s, [g._idx]: !s[g._idx] }))}
-                style={{ width: 18, height: 18, flexShrink: 0, marginTop: 2 }}
-              />
-              {/* Team names: two lines, no truncation */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
-                  <div>
-                    {/* Away */}
-                    <div style={{ fontSize: "0.78rem", color: COLORS.chalk, lineHeight: 1.4 }}>
-                      {g.awayRank ? <span style={{ color: COLORS.gold }}>#{g.awayRank} </span> : null}
-                      {g.away}
-                    </div>
-                    {/* Home */}
-                    <div style={{ fontSize: "0.78rem", color: COLORS.chalk, lineHeight: 1.4 }}>
-                      <span style={{ color: COLORS.muted }}>@ </span>
-                      {g.homeRank ? <span style={{ color: COLORS.gold }}>#{g.homeRank} </span> : null}
-                      {g.home}
-                    </div>
-                  </div>
-                  {/* Spread: compact number only — favored team shown by abbrev */}
-                  {g.spread ? (
-                    <div style={{ textAlign: "right", paddingTop: 1, flexShrink: 0 }}>
-                      <span style={{ fontSize: "0.65rem", color: COLORS.muted }}>{favAbbr} </span>
-                      <span style={{ fontSize: "0.78rem", color: COLORS.goldBright, fontWeight: 700 }}>-{g.spread}</span>
-                    </div>
-                  ) : null}
-                </div>
-                {/* Meta row */}
-                <div style={{ fontSize: "0.67rem", color: COLORS.muted, marginTop: 3 }}>
-                  {[g.kickoffTime, g.network].filter(Boolean).join(" · ")}
-                  {g.homeConf && g.awayConf && g.homeConf !== g.awayConf
-                    ? ` · ${g.awayConf} @ ${g.homeConf}` : ""}
-                </div>
-              </div>
-            </label>
-          );
-        }
-
-        // Reusable selected-games list content (shared by desktop panel + mobile sheet)
-        function SelectedPanel({ onUse }) {
-          return (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-              <div className="cfb-mono text-xs font-bold uppercase px-3 py-2" style={{ color: COLORS.goldBright, borderBottom: `1px solid ${COLORS.line}` }}>
-                {totalSelected > 0 ? `${totalSelected} selected · sorted by kickoff` : "no games selected yet"}
-              </div>
-              <div style={{ flex: 1, overflowY: "auto", padding: "6px" }}>
-                {selectedGamesList.length === 0 ? (
-                  <div className="cfb-mono text-xs text-center py-6" style={{ color: COLORS.muted }}>
-                    Check a game on the left to add it here
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {selectedGamesList.map((g) => {
-                      const awayAbbr = g.awayAbbr || teamAbbrev(g.away);
-                      const homeAbbr = g.homeAbbr || teamAbbrev(g.home);
-                      const favAbbr  = g.favorite === "home" ? homeAbbr : awayAbbr;
-                      return (
-                        <div key={g._idx} className="cfb-mono"
-                          style={{ background: COLORS.fieldMid, border: `1px solid ${COLORS.line}`, padding: "8px 10px" }}>
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "start" }}>
-                            {/* Teams: dot + abbrev, two lines */}
-                            <div>
-                              <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}>
-                                {g.awayColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.awayColor, flexShrink: 0, display: "inline-block" }} />}
-                                <span style={{ fontSize: "0.78rem", fontWeight: 600, color: COLORS.chalk }}>{awayAbbr}</span>
-                              </div>
-                              <div style={{ display: "flex", alignItems: "center", gap: 5, lineHeight: 1.5 }}>
-                                <span style={{ fontSize: "0.62rem", color: COLORS.muted, width: 8, textAlign: "center", flexShrink: 0 }}>@</span>
-                                {g.homeColor && <span style={{ width: 8, height: 8, borderRadius: "50%", background: g.homeColor, flexShrink: 0, display: "inline-block" }} />}
-                                <span style={{ fontSize: "0.78rem", fontWeight: 600, color: COLORS.chalk }}>{homeAbbr}</span>
-                              </div>
-                              {g.kickoffTime && (
-                                <div style={{ fontSize: "0.62rem", color: COLORS.muted, marginTop: 2 }}>{g.kickoffTime}</div>
-                              )}
-                            </div>
-                            {/* Spread + remove */}
-                            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                              {g.spread ? (
-                                <div style={{ textAlign: "right" }}>
-                                  <span style={{ fontSize: "0.6rem", color: COLORS.muted }}>{favAbbr} </span>
-                                  <span style={{ fontSize: "0.78rem", fontWeight: 700, color: COLORS.goldBright }}>-{g.spread}</span>
-                                </div>
-                              ) : null}
-                              <button onClick={() => setImportSelected((s) => ({ ...s, [g._idx]: false }))}
-                                style={{ color: COLORS.muted, fontSize: "0.9rem", lineHeight: 1 }}>✕</button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <div className="px-3 py-2 space-y-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                {totalSelected > 0 && (
-                  <button onClick={() => setImportSelected({})}
-                    className="cfb-mono text-xs w-full py-1.5"
-                    style={{ color: COLORS.muted, border: `1px solid ${COLORS.lineStrong}` }}>
-                    clear all
-                  </button>
-                )}
-                <PrimaryButton full onClick={onUse} disabled={totalSelected === 0}>
-                  Use these {totalSelected} game{totalSelected === 1 ? "" : "s"}
+                  {busy ? "Saving..." : `Create Week ${weekNumInput}`}
                 </PrimaryButton>
               </div>
             </div>
-          );
-        }
-
-        // Section list (shared between layouts)
-        // Receives computed q and visibleSections so the search <input> can live
-        // in the stable IIFE return (not inside this function) — prevents focus loss on keystroke.
-        function SectionList({ q, visibleSections }) {
-          const isExpanded = (label) => q ? true : expandedSections.has(label);
-          return (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 flex-wrap">
-                <button onClick={() => { const s = {}; importPreview.forEach((_, i) => (s[i] = true)); setImportSelected(s); }}
-                  className="cfb-mono text-xs px-2 py-1"
-                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}>select all</button>
-                <button onClick={() => setImportSelected({})}
-                  className="cfb-mono text-xs px-2 py-1"
-                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>clear all</button>
-                <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
-                  {q
-                    ? `${visibleSections.reduce((n, s) => n + s.games.length, 0)} result${visibleSections.reduce((n,s)=>n+s.games.length,0)===1?"":"s"}`
-                    : `${totalGames} games available`}
-                </span>
-              </div>
-              {q && visibleSections.length === 0 && (
-                <div className="cfb-mono text-xs text-center py-4" style={{ color: COLORS.muted }}>No games match "{q}"</div>
-              )}
-              {visibleSections.map((section) => {
-                const sectionIdxs = section.games.map((g) => g._idx);
-                const selectedInSection = sectionIdxs.filter((i) => importSelected[i]).length;
-                const allOn = selectedInSection === sectionIdxs.length;
-                const anyOn = selectedInSection > 0;
-                const expanded = isExpanded(section.label);
-                return (
-                  <div key={section.label}>
-                    <div className="flex items-center justify-between px-2 py-1.5 mb-1 cursor-pointer"
-                      style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
-                      onClick={() => { if (q) return; setExpandedSections((prev) => { const next = new Set(prev); if (next.has(section.label)) next.delete(section.label); else next.add(section.label); return next; }); }}>
-                      <span className="cfb-mono text-xs font-bold uppercase tracking-wider flex items-center gap-2"
-                        style={{ color: section.label === "Top 25" ? COLORS.goldBright : COLORS.chalkDim }}>
-                        {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                        {section.label === "Top 25" ? "🏆 Top 25" : section.label}
-                        <span className="font-normal" style={{ color: COLORS.muted }}>{selectedInSection}/{section.games.length}</span>
-                      </span>
-                      <button onClick={(e) => { e.stopPropagation(); const p = {}; sectionIdxs.forEach((i) => (p[i] = !allOn)); setImportSelected((s) => ({ ...s, ...p })); }}
-                        className="cfb-mono text-xs px-2 py-0.5"
-                        style={{ border: `1px solid ${COLORS.lineStrong}`, color: allOn ? COLORS.muted : COLORS.goldBright }}>
-                        {allOn ? "deselect" : anyOn ? "select rest" : "select all"}
-                      </button>
-                    </div>
-                    {expanded && (
-                      <div className="space-y-1">
-                        {section.games.map((g) => <SectionGameRow key={g._idx} g={g} />)}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          );
-        }
-
-        // Compute search results once — passed as props so SectionList doesn't recompute
-        const q = searchQuery.toLowerCase().trim();
-        const visibleSections = sections
-          .map((s) => ({ ...s, games: q ? s.games.filter((g) => g.away.toLowerCase().includes(q) || g.home.toLowerCase().includes(q)) : s.games }))
-          .filter((s) => s.games.length > 0);
-
-        // Search input is rendered directly in the return (not inside SectionList) so React
-        // reconciles it in-place on every render — input element is never unmounted, so
-        // focus is never lost when the user types.
-        const searchInput = (
-          <div style={{ position: "relative", marginBottom: 10 }}>
-            <Search size={13} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, pointerEvents: "none" }} />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search teams…"
-              style={{ width: "100%", paddingLeft: 30, paddingRight: searchQuery ? 28 : 8, paddingTop: 7, paddingBottom: 7, background: COLORS.fieldDeep, border: `1px solid ${searchQuery ? COLORS.goldBright : COLORS.lineStrong}`, color: COLORS.chalk, fontFamily: "var(--font-mono)", fontSize: "0.8rem" }}
-            />
-            {searchQuery && (
-              <button onClick={() => setSearchQuery("")}
-                style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: COLORS.muted, fontSize: "1rem", lineHeight: 1 }}>×</button>
-            )}
-          </div>
-        );
-
-        return (
-          <>
-            {/* ── DESKTOP: two-column split ── */}
-            {isDesktop ? (
-              /* ── DESKTOP: fixed-height split pane — no page scroll needed ── */
-              <div style={{
-                display: "flex",
-                height: "calc(100vh - 380px)",
-                minHeight: 380,
-                maxHeight: 720,
-                border: `1px solid ${COLORS.gold}`,
-                background: "rgba(217,164,65,0.04)",
-              }}>
-                {/* Left: search pinned at top, game list scrolls independently */}
-                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", borderRight: `1px solid ${COLORS.lineStrong}` }}>
-                  <div style={{ flexShrink: 0, padding: "10px 12px", borderBottom: `1px solid ${COLORS.line}` }}>
-                    {searchInput}
-                  </div>
-                  <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
-                    <SectionList q={q} visibleSections={visibleSections} />
-                  </div>
-                </div>
-                {/* Right: always-visible selected panel in its own flex context */}
-                <div style={{ width: 280, flexShrink: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-                  <SelectedPanel onUse={applyImportSelection} />
-                </div>
-              </div>
-            ) : (
-              /* ── MOBILE: full-width list + sticky count bar + bottom sheet ── */
-              <>
-                {/* Mobile bottom sheet */}
-                {showMobileSheet && (
-                  <>
-                    <div onClick={() => setShowMobileSheet(false)}
-                      style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)" }} />
-                    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 61, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.lineStrong}`, borderRadius: "14px 14px 0 0", maxHeight: "65vh", display: "flex", flexDirection: "column" }}>
-                      <div style={{ width: 36, height: 4, borderRadius: 2, background: COLORS.lineStrong, margin: "10px auto 4px" }} />
-                      <div style={{ flex: 1, minHeight: 0 }}>
-                        <SelectedPanel onUse={() => { setShowMobileSheet(false); applyImportSelection(); }} />
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                {/* Sticky count bar */}
-                <div style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.06)", padding: "8px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                  <span className="cfb-mono text-sm font-bold" style={{ color: totalSelected > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
-                    {totalSelected} <span className="font-normal text-xs" style={{ color: COLORS.chalkDim }}>/ {totalGames} selected</span>
-                  </span>
-                  <div className="flex gap-2">
-                    {totalSelected > 0 && (
-                      <button onClick={() => setShowMobileSheet(true)}
-                        className="cfb-mono text-xs px-3 py-1.5 font-bold"
-                        style={{ background: COLORS.gold, color: COLORS.ink, borderRadius: 3 }}>
-                        Review ({totalSelected}) →
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Section list */}
-                <div style={{ border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)", padding: 12 }}>
-                  {searchInput}
-                  <SectionList q={q} visibleSections={visibleSections} />
-                </div>
-              </>
-            )}
-          </>
-        );
-      })()}
-
-      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
-        <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.chalkDim }}>
-          Game week dates <span style={{ fontWeight: "normal", textTransform: "none", letterSpacing: 0, color: COLORS.muted }}>— used to auto-fetch scores after games are played</span>
+          )}
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          <div>
-            <div className="cfb-mono text-xs mb-1" style={{ color: COLORS.muted }}>from</div>
-            <FieldInput type="date" value={weekDatesFrom} onChange={setWeekDatesFrom} />
-          </div>
-          <div>
-            <div className="cfb-mono text-xs mb-1" style={{ color: COLORS.muted }}>to</div>
-            <FieldInput type="date" value={weekDatesTo} onChange={setWeekDatesTo} />
-          </div>
-        </div>
-        {!weekDatesFrom && (
-          <div className="text-xs mt-1.5" style={{ color: COLORS.muted }}>
-            Auto-fills when you import via The Odds API. Set manually if you enter games by hand.
-          </div>
-        )}
-      </div>
 
-      <div className="space-y-2">
-        {games.map((g, idx) => (
-          <div key={g.id} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
-            <div className="flex items-center justify-between mb-2">
-              <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
-                game {String(idx + 1).padStart(2, "0")}
-              </span>
-              {games.length > 1 && (
-                <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}>
-                  <Trash2 size={14} />
-                </button>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-2 mb-2">
-              <FieldInput value={g.away} onChange={(v) => updateGame(idx, { away: v })} placeholder="Away team" />
-              <FieldInput value={g.home} onChange={(v) => updateGame(idx, { home: v })} placeholder="Home team" />
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="flex-1 grid grid-cols-2 gap-1">
-                <button
-                  onClick={() => updateGame(idx, { favorite: "away" })}
-                  className="cfb-mono text-xs px-2 py-2"
-                  style={{
-                    background: g.favorite === "away" ? COLORS.gold : "transparent",
-                    color: g.favorite === "away" ? COLORS.ink : COLORS.chalkDim,
-                    border: `1px solid ${COLORS.lineStrong}`,
-                  }}
-                >
-                  fav: {g.away || "away"}
-                </button>
-                <button
-                  onClick={() => updateGame(idx, { favorite: "home" })}
-                  className="cfb-mono text-xs px-2 py-2"
-                  style={{
-                    background: g.favorite === "home" ? COLORS.gold : "transparent",
-                    color: g.favorite === "home" ? COLORS.ink : COLORS.chalkDim,
-                    border: `1px solid ${COLORS.lineStrong}`,
-                  }}
-                >
-                  fav: {g.home || "home"}
-                </button>
-              </div>
-              <div style={{ width: 84, flexShrink: 0 }}>
-                <FieldInput type="number" value={g.spread} onChange={(v) => updateGame(idx, { spread: v })} placeholder="spread" />
-              </div>
-            </div>
-            <div className="mt-1.5 flex items-center gap-2">
-              <FieldInput
-                value={g.kickoffTime || ""}
-                onChange={(v) => updateGame(idx, { kickoffTime: v })}
-                placeholder="Kickoff (e.g. Sat 11:00 AM CT)"
-              />
-              <button
-                onClick={() => updateGame(idx, { neutral: !g.neutral })}
-                className="cfb-mono text-xs px-2.5 py-2 flex-shrink-0 flex items-center gap-1.5"
-                style={{
-                  background: g.neutral ? "rgba(217,164,65,0.12)" : "transparent",
-                  border: `1px solid ${g.neutral ? COLORS.gold : COLORS.lineStrong}`,
-                  color: g.neutral ? COLORS.goldBright : COLORS.muted,
-                  whiteSpace: "nowrap",
-                }}
-                title="Toggle neutral site game"
-              >
-                ⚑ {g.neutral ? "neutral" : "@ site"}
+      ) : selectedWeek != null ? (
+        /* ── Edit existing week ── */
+        <div className="space-y-4 cfb-fade-in">
+          {currentWeekData && (
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => toggleLock(selectedWeek)}
+                className="cfb-mono cfb-btn text-xs font-semibold px-3 py-2 flex items-center gap-1.5"
+                style={{ background: currentWeekData.locked ? "rgba(217,164,65,0.16)" : "transparent", border: `1px solid ${currentWeekData.locked ? COLORS.gold : COLORS.lineStrong}`, color: currentWeekData.locked ? COLORS.goldBright : COLORS.chalkDim }}>
+                {currentWeekData.locked ? <><Lock size={12} /> locked — click to open</> : <><Unlock size={12} /> open — click to lock</>}
+              </button>
+              <button onClick={() => toggleHidePicksUntilKickoff(selectedWeek)}
+                className="cfb-mono cfb-btn text-xs font-semibold px-3 py-2 flex items-center gap-1"
+                style={{ background: currentWeekData.hidePicksUntilKickoff ? "rgba(217,164,65,0.16)" : "transparent", border: `1px solid ${currentWeekData.hidePicksUntilKickoff ? COLORS.gold : COLORS.lineStrong}`, color: currentWeekData.hidePicksUntilKickoff ? COLORS.goldBright : COLORS.chalkDim }}>
+                <Eye size={12} />
+                {currentWeekData.hidePicksUntilKickoff ? "picks hidden until kickoff — click to make visible" : "picks visible — click to hide until kickoff"}
               </button>
             </div>
-            <div className="mt-1.5">
-              <FieldInput
-                value={g.network || ""}
-                onChange={(v) => updateGame(idx, { network: v })}
-                placeholder="Network (e.g. ABC, ESPN, FOX)"
-              />
-            </div>
+          )}
+
+          <div className="space-y-2">
+            {games.map((g, idx) => (
+              <div key={g.id} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>game {String(idx + 1).padStart(2, "0")}</span>
+                  {games.length > 1 && (
+                    <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}><Trash2 size={14} /></button>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-2 mb-2">
+                  <FieldInput value={g.away} onChange={(v) => updateGame(idx, { away: v })} placeholder="Away team" />
+                  <FieldInput value={g.home} onChange={(v) => updateGame(idx, { home: v })} placeholder="Home team" />
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 grid grid-cols-2 gap-1">
+                    <button onClick={() => updateGame(idx, { favorite: "away" })} className="cfb-mono text-xs px-2 py-2"
+                      style={{ background: g.favorite === "away" ? COLORS.gold : "transparent", color: g.favorite === "away" ? COLORS.ink : COLORS.chalkDim, border: `1px solid ${COLORS.lineStrong}` }}>
+                      fav: {g.away || "away"}
+                    </button>
+                    <button onClick={() => updateGame(idx, { favorite: "home" })} className="cfb-mono text-xs px-2 py-2"
+                      style={{ background: g.favorite === "home" ? COLORS.gold : "transparent", color: g.favorite === "home" ? COLORS.ink : COLORS.chalkDim, border: `1px solid ${COLORS.lineStrong}` }}>
+                      fav: {g.home || "home"}
+                    </button>
+                  </div>
+                  <div style={{ width: 84, flexShrink: 0 }}>
+                    <FieldInput type="number" value={g.spread} onChange={(v) => updateGame(idx, { spread: v })} placeholder="spread" />
+                  </div>
+                </div>
+                <div className="mt-1.5 flex items-center gap-2">
+                  <FieldInput value={g.kickoffTime || ""} onChange={(v) => updateGame(idx, { kickoffTime: v })} placeholder="Kickoff (e.g. Sat 11:00 AM CT)" />
+                  <button onClick={() => updateGame(idx, { neutral: !g.neutral })}
+                    className="cfb-mono text-xs px-2.5 py-2 flex-shrink-0 flex items-center gap-1.5"
+                    style={{ background: g.neutral ? "rgba(217,164,65,0.12)" : "transparent", border: `1px solid ${g.neutral ? COLORS.gold : COLORS.lineStrong}`, color: g.neutral ? COLORS.goldBright : COLORS.muted, whiteSpace: "nowrap" }}>
+                    ⚑ {g.neutral ? "neutral" : "@ site"}
+                  </button>
+                </div>
+                <div className="mt-1.5">
+                  <FieldInput value={g.network || ""} onChange={(v) => updateGame(idx, { network: v })} placeholder="Network (e.g. ABC, ESPN)" />
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+          <SecondaryButton onClick={addRow}>
+            <span className="flex items-center gap-1"><Plus size={12} /> add game</span>
+          </SecondaryButton>
 
-      <SecondaryButton onClick={addRow}>
-        <span className="flex items-center gap-1"><Plus size={12} /> add game</span>
-      </SecondaryButton>
+          <div style={{ position: "sticky", bottom: 0, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.line}`, paddingTop: 12, paddingBottom: 16, marginTop: 8, zIndex: 10 }}>
+            <PrimaryButton full disabled={!valid || busy}
+              onClick={async () => {
+                setBusy(true);
+                const wk = Number(weekNumInput);
+                const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
+                const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
+                const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false, weekDates);
+                setBusy(false);
+                if (ok) { setSelectedWeek(wk); if (wizardStep) setWizardStep(null); }
+              }}
+            >
+              {busy ? "Saving..." : "Save changes"}
+            </PrimaryButton>
+          </div>
+        </div>
 
-      <div
-        style={{
-          position: "sticky",
-          bottom: 0,
-          background: COLORS.fieldDark,
-          borderTop: `1px solid ${COLORS.line}`,
-          paddingTop: 12,
-          paddingBottom: 16,
-          marginTop: 8,
-          zIndex: 10,
-        }}
-      >
-        <PrimaryButton
-          full
-          disabled={!valid || busy}
-          onClick={async () => {
-            setBusy(true);
-            const wk = Number(weekNumInput);
-            const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
-            const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
-            const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false, weekDates);
-            setBusy(false);
-            if (ok) setSelectedWeek(wk);
-          }}
-        >
-          {busy ? "Saving..." : selectedWeek != null ? "Save changes" : "Create week"}
-        </PrimaryButton>
-      </div>
+      ) : null}
     </div>
     </>
   );
 }
+
 
 function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGradeWeek, picksCache, saveUnderdogResults }) {
   const [selectedWeek, setSelectedWeek] = useState(leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) : null);
