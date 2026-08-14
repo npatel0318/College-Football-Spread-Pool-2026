@@ -5138,14 +5138,26 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
           <>
             {/* ── DESKTOP: two-column split ── */}
             {isDesktop ? (
-              <div style={{ display: "grid", gridTemplateColumns: "65% 35%", gap: 16, border: `1px solid ${COLORS.gold}`, background: "rgba(217,164,65,0.04)", padding: 12 }}>
-                {/* Left: browseable game list */}
-                <div>
-                  {searchInput}
-                  <SectionList q={q} visibleSections={visibleSections} />
+              /* ── DESKTOP: fixed-height split pane — no page scroll needed ── */
+              <div style={{
+                display: "flex",
+                height: "calc(100vh - 380px)",
+                minHeight: 380,
+                maxHeight: 720,
+                border: `1px solid ${COLORS.gold}`,
+                background: "rgba(217,164,65,0.04)",
+              }}>
+                {/* Left: search pinned at top, game list scrolls independently */}
+                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden", borderRight: `1px solid ${COLORS.lineStrong}` }}>
+                  <div style={{ flexShrink: 0, padding: "10px 12px", borderBottom: `1px solid ${COLORS.line}` }}>
+                    {searchInput}
+                  </div>
+                  <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
+                    <SectionList q={q} visibleSections={visibleSections} />
+                  </div>
                 </div>
-                {/* Right: always-visible selected panel */}
-                <div style={{ border: `1px solid ${COLORS.lineStrong}`, background: COLORS.fieldDark, display: "flex", flexDirection: "column", maxHeight: 520, minHeight: 200, position: "sticky", top: 0 }}>
+                {/* Right: always-visible selected panel in its own flex context */}
+                <div style={{ width: 280, flexShrink: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
                   <SelectedPanel onUse={applyImportSelection} />
                 </div>
               </div>
@@ -5295,21 +5307,34 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
         <span className="flex items-center gap-1"><Plus size={12} /> add game</span>
       </SecondaryButton>
 
-      <PrimaryButton
-        full
-        disabled={!valid || busy}
-        onClick={async () => {
-          setBusy(true);
-          const wk = Number(weekNumInput);
-          const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
-          const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
-          const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false, weekDates);
-          setBusy(false);
-          if (ok) setSelectedWeek(wk);
+      <div
+        style={{
+          position: "sticky",
+          bottom: 0,
+          background: COLORS.fieldDark,
+          borderTop: `1px solid ${COLORS.line}`,
+          paddingTop: 12,
+          paddingBottom: 16,
+          marginTop: 8,
+          zIndex: 10,
         }}
       >
-        {busy ? "Saving..." : selectedWeek != null ? "Save changes" : "Create week"}
-      </PrimaryButton>
+        <PrimaryButton
+          full
+          disabled={!valid || busy}
+          onClick={async () => {
+            setBusy(true);
+            const wk = Number(weekNumInput);
+            const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
+            const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
+            const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false, weekDates);
+            setBusy(false);
+            if (ok) setSelectedWeek(wk);
+          }}
+        >
+          {busy ? "Saving..." : selectedWeek != null ? "Save changes" : "Create week"}
+        </PrimaryButton>
+      </div>
     </div>
   );
 }
