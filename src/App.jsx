@@ -3461,11 +3461,19 @@ function CommishTab({
   regenerateMemberToken,
   saveWeeklyAdjustments,
 }) {
-  const [mode, setMode] = useState("games"); // games | results | wtBoard | wtResults | pBoard | pResults | money
+  const [mode, setMode] = useState("games");
   const [editingWeek, setEditingWeek] = useState(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetConfirming, setResetConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(
+    typeof window !== "undefined" && window.innerWidth >= 768
+  );
+  useEffect(() => {
+    const handler = () => setIsDesktop(window.innerWidth >= 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   if (!commishUnlocked) {
     return (
@@ -3482,50 +3490,45 @@ function CommishTab({
     );
   }
 
-  return (
-    <div className="cfb-fade-in space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="cfb-display text-xl uppercase">Commissioner</div>
-        <div className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.goldBright }}>
-          <Shield size={12} /> unlocked
-        </div>
-      </div>
+  const NAV_GROUPS = [
+    {
+      label: "This week",
+      items: [
+        { id: "games",   label: "Manage games",      short: "Games",    icon: Target      },
+        { id: "results", label: "Enter results",      short: "Results",  icon: CheckCircle2 },
+      ],
+    },
+    {
+      label: "Preseason",
+      items: [
+        { id: "wtBoard",   label: "Win totals board",   short: "WT Board",    icon: Trophy  },
+        { id: "wtResults", label: "Win totals results", short: "WT Results",  icon: TrendingUp },
+        { id: "pBoard",    label: "Playoff board",      short: "CFP Board",   icon: Award   },
+        { id: "pResults",  label: "Playoff results",    short: "CFP Results", icon: Award   },
+      ],
+    },
+    {
+      label: "Admin",
+      items: [
+        { id: "members",     label: "Members",        short: "Members",  icon: Users      },
+        { id: "money",       label: "Money",          short: "Money",    icon: DollarSign },
+        { id: "adjustments", label: "Adjustments",    short: "Adjust.",  icon: Flame      },
+        { id: "history",     label: "Import history", short: "History",  icon: Clock      },
+      ],
+    },
+  ];
 
-      <div className="flex flex-wrap gap-2">
-        <SecondaryButton onClick={() => { setMode("games"); setEditingWeek(null); }} disabled={mode === "games" && editingWeek === null}>
-          Manage games
-        </SecondaryButton>
-        <SecondaryButton onClick={() => { setMode("results"); setEditingWeek(null); }} disabled={mode === "results" && editingWeek === null}>
-          Enter results
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("wtBoard")} disabled={mode === "wtBoard"}>
-          Win totals board
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("wtResults")} disabled={mode === "wtResults"}>
-          Win totals results
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("pBoard")} disabled={mode === "pBoard"}>
-          Playoff board
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("pResults")} disabled={mode === "pResults"}>
-          Playoff results
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("money")} disabled={mode === "money"}>
-          Money
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("history")} disabled={mode === "history"}>
-          Import history
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("members")} disabled={mode === "members"}>
-          Members
-        </SecondaryButton>
-        <SecondaryButton onClick={() => setMode("adjustments")} disabled={mode === "adjustments"}>
-          Adjustments
-        </SecondaryButton>
-      </div>
+  function goMode(id) {
+    setMode(id);
+    if (id === "games") setEditingWeek(null);
+  }
 
-      <div className="text-sm flex items-center gap-1.5" style={{ color: COLORS.chalkDim }}>
-        <Users size={14} /> {leagueMeta.members.length} in the pool: {leagueMeta.members.join(", ")}
+  // Mode content — shared between desktop and mobile layouts
+  const modeContent = (
+    <div className="space-y-4 cfb-fade-in">
+      <div className="text-xs" style={{ color: COLORS.muted }}>
+        <Users size={12} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
+        {leagueMeta.members.length} in the pool: {leagueMeta.members.join(", ")}
       </div>
 
       {mode === "games" && (
@@ -3540,7 +3543,6 @@ function CommishTab({
           deleteWeek={deleteWeek}
         />
       )}
-
       {mode === "results" && (
         <ResultsManager
           leagueMeta={leagueMeta}
@@ -3552,7 +3554,6 @@ function CommishTab({
           saveUnderdogResults={saveUnderdogResults}
         />
       )}
-
       {mode === "wtBoard" && (
         <WinTotalsBoardManager
           leagueMeta={leagueMeta}
@@ -3562,7 +3563,6 @@ function CommishTab({
           toggleWinTotalsLock={toggleWinTotalsLock}
         />
       )}
-
       {mode === "wtResults" && (
         <WinTotalsResultsManager
           leagueMeta={leagueMeta}
@@ -3571,7 +3571,6 @@ function CommishTab({
           saveWinTotalsResults={saveWinTotalsResults}
         />
       )}
-
       {mode === "pBoard" && (
         <PlayoffBoardManager
           leagueMeta={leagueMeta}
@@ -3581,7 +3580,6 @@ function CommishTab({
           togglePlayoffLock={togglePlayoffLock}
         />
       )}
-
       {mode === "pResults" && (
         <PlayoffResultsManager
           leagueMeta={leagueMeta}
@@ -3590,7 +3588,6 @@ function CommishTab({
           savePlayoffResults={savePlayoffResults}
         />
       )}
-
       {mode === "money" && (
         <MoneySettingsManager
           leagueMeta={leagueMeta}
@@ -3603,69 +3600,161 @@ function CommishTab({
           unfinalizeSeasonPayouts={unfinalizeSeasonPayouts}
         />
       )}
-
       {mode === "history" && (
         <HistoryImportManager historyData={historyData} saveHistoryData={saveHistoryData} />
       )}
-
       {mode === "members" && (
         <MembersManager leagueMeta={leagueMeta} deleteMember={deleteMember} addMember={addMember} regenerateMemberToken={regenerateMemberToken} />
       )}
-
       {mode === "adjustments" && (
         <AdjustmentsManager leagueMeta={leagueMeta} saveWeeklyAdjustments={saveWeeklyAdjustments} />
       )}
+    </div>
+  );
 
-      <div className="mt-6 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-        <button
-          onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
-          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5"
-          style={{ color: COLORS.redBright }}
-        >
-          <AlertCircle size={13} /> Danger zone (testing only)
-        </button>
-        {resetOpen && (
-          <div className="mt-3 p-3 space-y-3" style={{ background: "rgba(179,55,42,0.08)", border: `1px solid ${COLORS.red}` }}>
-            <div className="text-sm" style={{ color: COLORS.chalk }}>
-              This permanently deletes every member, every week's games and picks, every win totals board and
-              pick, every playoff board and pick, and resets money settings and season payouts. Your league name
-              and commissioner passcode are kept, but everyone — including you — will need to rejoin under a
-              name afterward. Remove this button before opening the pool to real members.
-            </div>
-            {!resetConfirming ? (
-              <SecondaryButton
-                onClick={() => setResetConfirming(true)}
-                disabled={resetting}
-              >
-                Reset all data
-              </SecondaryButton>
-            ) : (
-              <div className="space-y-2">
-                <div className="text-sm font-semibold" style={{ color: COLORS.redBright }}>
-                  Are you sure? This can't be undone.
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={async () => {
-                      setResetting(true);
-                      await resetAllData();
-                      setResetting(false);
-                    }}
-                    disabled={resetting}
-                    className="cfb-mono cfb-btn text-xs font-bold uppercase tracking-wider px-3 py-2"
-                    style={{ background: COLORS.red, color: COLORS.chalk, border: `1px solid ${COLORS.red}`, opacity: resetting ? 0.6 : 1 }}
-                  >
-                    {resetting ? "Deleting everything..." : "Yes, delete everything"}
-                  </button>
-                  <SecondaryButton onClick={() => setResetConfirming(false)} disabled={resetting}>
-                    Cancel
-                  </SecondaryButton>
-                </div>
-              </div>
-            )}
+  // Danger zone — shown at the bottom of the content area in both layouts
+  const dangerZone = (
+    <div className="pt-4 mt-6" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+      <button
+        onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
+        className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5"
+        style={{ color: COLORS.redBright }}
+      >
+        <AlertCircle size={13} /> Danger zone (testing only)
+      </button>
+      {resetOpen && (
+        <div className="mt-3 p-3 space-y-3" style={{ background: "rgba(179,55,42,0.08)", border: `1px solid ${COLORS.red}` }}>
+          <div className="text-sm" style={{ color: COLORS.chalk }}>
+            Permanently deletes every member, week, pick, win totals board, and playoff board, and resets money settings and season payouts. League name and passcode are kept. Remove this before opening the pool to real members.
           </div>
-        )}
+          {!resetConfirming ? (
+            <SecondaryButton onClick={() => setResetConfirming(true)} disabled={resetting}>
+              Reset all data
+            </SecondaryButton>
+          ) : (
+            <div className="space-y-2">
+              <div className="text-sm font-semibold" style={{ color: COLORS.redBright }}>
+                Are you sure? This can't be undone.
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => { setResetting(true); await resetAllData(); setResetting(false); }}
+                  disabled={resetting}
+                  className="cfb-mono cfb-btn text-xs font-bold uppercase tracking-wider px-3 py-2"
+                  style={{ background: COLORS.red, color: COLORS.chalk, border: `1px solid ${COLORS.red}`, opacity: resetting ? 0.6 : 1 }}
+                >
+                  {resetting ? "Deleting everything..." : "Yes, delete everything"}
+                </button>
+                <SecondaryButton onClick={() => setResetConfirming(false)} disabled={resetting}>Cancel</SecondaryButton>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="cfb-fade-in">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="cfb-display text-xl uppercase">Commissioner</div>
+        <div className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.goldBright }}>
+          <Shield size={12} /> unlocked
+        </div>
       </div>
+
+      {isDesktop ? (
+        /* ── DESKTOP: persistent sidebar + content panel ── */
+        <div style={{ display: "flex", minHeight: 480, border: `1px solid ${COLORS.line}`, borderRadius: 4 }}>
+          {/* Sidebar */}
+          <div style={{ width: 188, flexShrink: 0, borderRight: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep, display: "flex", flexDirection: "column" }}>
+            {NAV_GROUPS.map((group) => (
+              <div key={group.label}>
+                <div
+                  className="cfb-mono text-xs uppercase px-3 pt-3 pb-1"
+                  style={{ color: COLORS.muted, letterSpacing: "0.07em" }}
+                >
+                  {group.label}
+                </div>
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = mode === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => goMode(item.id)}
+                      className="cfb-mono cfb-btn w-full flex items-center gap-2 px-3 py-2.5 text-xs text-left"
+                      style={{
+                        background: active ? "rgba(217,164,65,0.07)" : "transparent",
+                        color: active ? COLORS.goldBright : COLORS.chalkDim,
+                        borderLeft: `2px solid ${active ? COLORS.gold : "transparent"}`,
+                        borderRadius: 0,
+                        WebkitTapHighlightColor: "transparent",
+                      }}
+                    >
+                      <Icon size={13} style={{ flexShrink: 0 }} />
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+
+            {/* Danger zone trigger at bottom of sidebar */}
+            <div style={{ marginTop: "auto", borderTop: `1px solid ${COLORS.line}`, padding: "12px 12px 14px" }}>
+              <button
+                onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
+                className="cfb-mono text-xs flex items-center gap-1.5 opacity-60 hover:opacity-100"
+                style={{ color: COLORS.redBright }}
+              >
+                <AlertCircle size={12} /> Danger zone
+              </button>
+            </div>
+          </div>
+
+          {/* Content area */}
+          <div style={{ flex: 1, minWidth: 0, padding: "20px 24px", background: COLORS.fieldDark, overflowY: "auto" }}>
+            {modeContent}
+            {resetOpen && dangerZone}
+          </div>
+        </div>
+      ) : (
+        /* ── MOBILE: scrollable tab strip + content below ── */
+        <>
+          <div className="overflow-x-auto cfb-scroll" style={{ borderBottom: `1px solid ${COLORS.line}`, marginBottom: 16 }}>
+            <div style={{ display: "flex", minWidth: "max-content" }}>
+              {NAV_GROUPS.map((group, gi) => (
+                <div key={group.label} style={{ display: "flex", borderRight: gi < NAV_GROUPS.length - 1 ? `1px solid ${COLORS.line}` : "none" }}>
+                  {group.items.map((item) => {
+                    const Icon = item.icon;
+                    const active = mode === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => goMode(item.id)}
+                        className="cfb-mono cfb-btn flex-shrink-0 flex items-center gap-1.5 px-3 py-2.5 text-xs"
+                        style={{
+                          color: active ? COLORS.goldBright : COLORS.chalkDim,
+                          borderBottom: `2px solid ${active ? COLORS.gold : "transparent"}`,
+                          background: active ? "rgba(217,164,65,0.06)" : "transparent",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        <Icon size={12} />
+                        {item.short}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {modeContent}
+          {dangerZone}
+        </>
+      )}
     </div>
   );
 }
