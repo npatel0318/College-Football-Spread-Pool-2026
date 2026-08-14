@@ -4574,35 +4574,33 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   // Step indicator for wizard mode
   function StepBar({ step }) {
     const STEPS = [{ n: 1, label: "Week" }, { n: 2, label: "Select games" }, { n: 3, label: "Save" }];
-    return (
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 20 }}>
-        {STEPS.map((s, i) => (
-          <React.Fragment key={s.n}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-              <div style={{
-                width: 24, height: 24, borderRadius: "50%",
-                background: step > s.n ? COLORS.gold : step === s.n ? "rgba(217,164,65,0.15)" : COLORS.fieldDeep,
-                border: `1px solid ${step > s.n ? COLORS.gold : step === s.n ? COLORS.gold : COLORS.lineStrong}`,
-                color: step > s.n ? COLORS.ink : step === s.n ? COLORS.goldBright : COLORS.muted,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: "0.7rem", fontWeight: 700, fontFamily: "var(--font-mono)", flexShrink: 0,
-              }}>
-                {step > s.n ? "✓" : s.n}
-              </div>
-              <span className="cfb-mono" style={{
-                fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em",
-                color: step === s.n ? COLORS.goldBright : step > s.n ? COLORS.muted : "#444",
-              }}>
-                {s.label}
-              </span>
-            </div>
-            {i < STEPS.length - 1 && (
-              <div style={{ flex: 1, height: 1, background: COLORS.line, margin: "0 10px" }} />
-            )}
-          </React.Fragment>
-        ))}
-      </div>
-    );
+    const items = [];
+    STEPS.forEach((s, i) => {
+      items.push(
+        <div key={`step-${s.n}`} style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <div style={{
+            width: 24, height: 24, borderRadius: "50%",
+            background: step > s.n ? COLORS.gold : step === s.n ? "rgba(217,164,65,0.15)" : COLORS.fieldDeep,
+            border: `1px solid ${step > s.n ? COLORS.gold : step === s.n ? COLORS.gold : COLORS.lineStrong}`,
+            color: step > s.n ? COLORS.ink : step === s.n ? COLORS.goldBright : COLORS.muted,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: "0.7rem", fontWeight: 700, fontFamily: "var(--font-mono)", flexShrink: 0,
+          }}>
+            {step > s.n ? "✓" : s.n}
+          </div>
+          <span className="cfb-mono" style={{
+            fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em",
+            color: step === s.n ? COLORS.goldBright : step > s.n ? COLORS.muted : "#444",
+          }}>
+            {s.label}
+          </span>
+        </div>
+      );
+      if (i < STEPS.length - 1) {
+        items.push(<div key={`line-${i}`} style={{ flex: 1, height: 1, background: COLORS.line, margin: "0 10px" }} />);
+      }
+    });
+    return <div style={{ display: "flex", alignItems: "center", marginBottom: 20 }}>{items}</div>;
   }
 
   // Step 1: set week number
@@ -4897,9 +4895,9 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
       {/* ── Wizard (new week creation) ── */}
       {wizardStep ? (
         <div className="cfb-fade-in">
-          <StepBar step={wizardStep} />
-          {wizardStep === 1 && <Step1 />}
-          {wizardStep === 2 && <Step2 />}
+          {StepBar({ step: wizardStep })}
+          {wizardStep === 1 && Step1()}
+          {wizardStep === 2 && Step2()}
           {wizardStep === 3 && (
             <div className="space-y-3 cfb-fade-in">
               <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
