@@ -4096,43 +4096,41 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const nextWeekNum = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) + 1 : 1;
   const defaultYear = new Date().getFullYear();
 
-  // Core state
+  // ── core state ──────────────────────────────────────────────────────────
   const [selectedWeek, setSelectedWeek] = useState(null);
   const [games, setGames] = useState([]);
   const [weekNumInput, setWeekNumInput] = useState(String(nextWeekNum));
   const [busy, setBusy] = useState(false);
   const [loadedExisting, setLoadedExisting] = useState(false);
   const [confirmDeleteWeek, setConfirmDeleteWeek] = useState(null);
+  const [showManualEntry, setShowManualEntry] = useState(false);
 
-  // Wizard: null = not in wizard, 1/2/3 = step
-  const [wizardStep, setWizardStep] = useState(null);
-
-  // Step 2 — import from Odds API
-  const [importPreview, setImportPreview] = useState(null);
-  const [importSelected, setImportSelected] = useState({});
-  const [confirmingGames, setConfirmingGames] = useState(null);
-  const [showAdvancedOdds, setShowAdvancedOdds] = useState(false); // year/week override
+  // ── odds api ─────────────────────────────────────────────────────────────
+  const [oddsOpen, setOddsOpen] = useState(false);
   const [oddsKeyInput, setOddsKeyInput] = useState("");
   const [oddsKeySaved, setOddsKeySaved] = useState(false);
   const [oddsKeyLoading, setOddsKeyLoading] = useState(true);
   const [oddsYear, setOddsYear] = useState(defaultYear);
-  const [oddsWeek, setOddsWeek] = useState(nextWeekNum);
+  const [oddsWeek, setOddsWeek] = useState(nextWeekNum || 1);
   const [oddsShowCustomRange, setOddsShowCustomRange] = useState(false);
   const [oddsFrom, setOddsFrom] = useState(isoDateInput(new Date()));
   const [oddsTo, setOddsTo] = useState(isoDateInput(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)));
-  const [weekDatesFrom, setWeekDatesFrom] = useState("");
-  const [weekDatesTo, setWeekDatesTo] = useState("");
   const [oddsBusy, setOddsBusy] = useState(false);
   const [oddsError, setOddsError] = useState(null);
+  const [weekDatesFrom, setWeekDatesFrom] = useState("");
+  const [weekDatesTo, setWeekDatesTo] = useState("");
 
-  // Step 2 — manual entry (within wizard; starts empty)
-  const [showManualEntry, setShowManualEntry] = useState(false);
+  // ── import preview ────────────────────────────────────────────────────────
+  const [importPreview, setImportPreview] = useState(null);
+  const [importSelected, setImportSelected] = useState({});
+  const [confirmingGames, setConfirmingGames] = useState(null);
 
-  // Responsive layout
+  // ── responsive layout (import panel) ─────────────────────────────────────
   const [isDesktop, setIsDesktop] = useState(typeof window !== "undefined" && window.innerWidth >= 768);
   const [expandedSections, setExpandedSections] = useState(new Set(["Top 25"]));
   const [showMobileSheet, setShowMobileSheet] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const prevTotalRef = useRef(0);
 
   useEffect(() => {
     const handler = () => setIsDesktop(window.innerWidth >= 768);
@@ -4148,7 +4146,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     }
   }, [!!importPreview]);
 
-  // Kickoff sort helper — hoisted so it's available for the side panel too
+  // Kickoff sort key
   const KICKOFF_DAY = { thu: 0, fri: 1, sat: 2, sun: 3, mon: 4, tue: 5, wed: 6 };
   function kickoffSortKey(t) {
     if (!t) return 9999;
@@ -4163,309 +4161,25 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     return (KICKOFF_DAY[day[1]] ?? 9) * 10000 + h * 100 + m;
   }
 
-  // Computed selected games list for the side panel
+  // Selected games list for the right panel (sorted by kickoff)
   const totalSelected = Object.values(importSelected).filter(Boolean).length;
   const selectedGamesList = importPreview
     ? importPreview
         .map((g, i) => ({ ...g, _idx: i }))
         .filter((g) => importSelected[g._idx])
         .sort((a, b) => {
-          if (a.kickoffISO && b.kickoffISO)
-            return new Date(a.kickoffISO) - new Date(b.kickoffISO);
+          if (a.kickoffISO && b.kickoffISO) return new Date(a.kickoffISO) - new Date(b.kickoffISO);
           return kickoffSortKey(a.kickoffTime) - kickoffSortKey(b.kickoffTime);
         })
     : [];
 
-  // On mobile, auto-open the review sheet when the first game is selected
-  const prevTotalRef = useRef(0);
+  // Auto-open mobile sheet on first selection
   useEffect(() => {
     if (!isDesktop && prevTotalRef.current === 0 && totalSelected > 0) setShowMobileSheet(true);
     prevTotalRef.current = totalSelected;
   }, [totalSelected, isDesktop]);
 
-
-  useEffect(() => {
-    (async () => {
-      const raw = await safeGet("odds-api-key", false);
-      if (raw) {
-        setOddsKeyInput(raw);
-        setOddsKeySaved(true);
-      }
-      setOddsKeyLoading(false);
-    })();
-  }, []);
-
-  async function saveOddsKey() {
-    const r = await storage.set("odds-api-key", oddsKeyInput.trim(), false).catch(() => null);
-    if (r) setOddsKeySaved(true);
-    else setOddsError("Couldn't save the key on this device — try again.");
-  }
-
-  async function clearOddsKey() {
-    await storage.delete("odds-api-key", false).catch(() => null);
-    setOddsKeyInput("");
-    setOddsKeySaved(false);
-  }
-
-  useEffect(() => {
-    (async () => {
-      const raw = await safeGet("cfbd-api-key", false);
-      if (raw) {
-        setCfbdKeyInput(raw);
-        setCfbdKeySaved(true);
-      }
-      setCfbdKeyLoading(false);
-    })();
-  }, []);
-
-  async function saveCfbdKey() {
-    const r = await storage.set("cfbd-api-key", cfbdKeyInput.trim(), false).catch(() => null);
-    if (r) setCfbdKeySaved(true);
-    else setCfbdError("Couldn't save the key on this device — try again.");
-  }
-
-  async function clearCfbdKey() {
-    await storage.delete("cfbd-api-key", false).catch(() => null);
-    setCfbdKeyInput("");
-    setCfbdKeySaved(false);
-  }
-
-  async function fetchCfbdWeek() {
-    setCfbdError(null);
-    setCfbdBusy(true);
-    try {
-      const headers = { Authorization: `Bearer ${cfbdKeyInput.trim()}`, Accept: "application/json" };
-      const base = "https://api.collegefootballdata.com";
-      const gamesUrl = `${base}/games?year=${cfbdYear}&week=${cfbdWeek}&seasonType=${cfbdSeasonType}&classification=fbs`;
-      const linesUrl = `${base}/lines?year=${cfbdYear}&week=${cfbdWeek}&seasonType=${cfbdSeasonType}`;
-      const ranksUrl = `${base}/rankings?year=${cfbdYear}&week=${cfbdWeek}&seasonType=${cfbdSeasonType}`;
-
-      const [gamesRes, linesRes, ranksRes] = await Promise.all([
-        fetch(gamesUrl, { headers }),
-        fetch(linesUrl, { headers }),
-        fetch(ranksUrl, { headers }),
-      ]);
-
-      if (gamesRes.status === 401 || gamesRes.status === 403) {
-        throw new Error("CFBD rejected that API key. Double check it was copied in full.");
-      }
-      if (!gamesRes.ok) {
-        throw new Error(`CFBD games request failed (status ${gamesRes.status}).`);
-      }
-      const gamesData = await gamesRes.json();
-      const linesData = linesRes.ok ? await linesRes.json() : [];
-      const ranksData = ranksRes.ok ? await ranksRes.json() : [];
-
-      const rankMap = {};
-      const weekRankings = Array.isArray(ranksData) ? ranksData[0] : null;
-      const apPoll =
-        weekRankings?.polls?.find((p) => /ap/i.test(p.poll || "")) || weekRankings?.polls?.[0] || null;
-      (apPoll?.ranks || []).forEach((r) => {
-        rankMap[normalizeTeam(r.school)] = r.rank;
-      });
-
-      const lineMap = {};
-      (Array.isArray(linesData) ? linesData : []).forEach((l) => {
-        const gid = l.id ?? l.gameId ?? l.game_id;
-        const ln = (l.lines || [])[0];
-        if (gid != null && ln && ln.spread != null) lineMap[gid] = Number(ln.spread);
-      });
-
-      const confFilter = cfbdConferences
-        .split(",")
-        .map((s) => s.trim().toLowerCase())
-        .filter(Boolean);
-
-      const merged = (Array.isArray(gamesData) ? gamesData : [])
-        .map((g) => {
-          const id = g.id ?? g.gameId ?? g.game_id;
-          const home = g.homeTeam ?? g.home_team;
-          const away = g.awayTeam ?? g.away_team;
-          const homeConf = g.homeConference ?? g.home_conference ?? "";
-          const awayConf = g.awayConference ?? g.away_conference ?? "";
-          const rawSpread = lineMap[id];
-          return {
-            away,
-            home,
-            homeConf,
-            awayConf,
-            rawSpread,
-            awayRank: rankMap[normalizeTeam(away)] || null,
-            homeRank: rankMap[normalizeTeam(home)] || null,
-          };
-        })
-        .filter((g) => g.home && g.away && g.rawSpread != null)
-        .filter((g) => {
-          if (!cfbdTop25Only && confFilter.length === 0) return true;
-          const ranked = g.awayRank || g.homeRank;
-          const confMatch =
-            confFilter.includes((g.homeConf || "").toLowerCase()) ||
-            confFilter.includes((g.awayConf || "").toLowerCase());
-          return (cfbdTop25Only && ranked) || (confFilter.length > 0 && confMatch);
-        })
-        .map((g) => ({
-          away: g.away,
-          home: g.home,
-          favorite: g.rawSpread < 0 ? "home" : "away",
-          spread: Math.abs(g.rawSpread),
-          conference:
-            g.homeConf && g.awayConf
-              ? g.homeConf === g.awayConf
-                ? g.homeConf
-                : `${g.awayConf} @ ${g.homeConf}`
-              : g.homeConf || g.awayConf || "",
-          awayRank: g.awayRank,
-          homeRank: g.homeRank,
-        }));
-
-      if (!merged.length) {
-        setCfbdError(
-          "No games matched. Lines sometimes don't post until a few days before kickoff — or try widening Top 25 / conference filters."
-        );
-      } else {
-        setImportPreview(merged);
-        setImportSelected({});
-        setImportOpen(true);
-        setCfbdOpen(false);
-      }
-    } catch (e) {
-      const networkIssue = e instanceof TypeError;
-      setCfbdError(
-        networkIssue
-          ? "Couldn't reach CollegeFootballData from this browser. Paste a list instead below — ask me in chat to generate one — or run the standalone script."
-          : e.message || "Something went wrong fetching games."
-      );
-    } finally {
-      setCfbdBusy(false);
-    }
-  }
-
-  async function fetchOddsApiWeek() {
-    setOddsError(null);
-    setOddsBusy(true);
-    try {
-      const key = localStorage.getItem("cfbpool:odds-api-key") || oddsKeyInput.trim();
-      if (!key) { setOddsError("Enter your Odds API key first."); setOddsBusy(false); return; }
-
-      // Resolve the date range — ESPN week lookup or manual custom range
-      let from = oddsFrom, to = oddsTo;
-      if (!oddsShowCustomRange) {
-        const espnDates = await fetchEspnWeekDates(oddsYear, oddsWeek);
-        if (!espnDates) {
-          setOddsError(`Couldn't find ESPN dates for ${oddsYear} Week ${oddsWeek}. Try the custom date range option below.`);
-          setOddsBusy(false);
-          return;
-        }
-        from = espnDates.from;
-        to   = espnDates.to;
-      }
-
-      const params = new URLSearchParams({
-        apiKey: key,
-        regions: "us",
-        markets: "spreads",
-        oddsFormat: "american",
-      });
-      if (from) params.set("commenceTimeFrom", `${from}T00:00:00Z`);
-      if (to)   params.set("commenceTimeTo",   `${to}T23:59:59Z`);
-      const url = `https://api.the-odds-api.com/v4/sports/americanfootball_ncaaf/odds?${params.toString()}`;
-
-      const res = await fetch(url);
-      if (res.status === 401) {
-        throw new Error("The Odds API rejected that key. Double check it was copied in full.");
-      }
-      if (!res.ok) {
-        throw new Error(`The Odds API request failed (status ${res.status}).`);
-      }
-      const data = await res.json();
-
-      const merged = (Array.isArray(data) ? data : [])
-        .map((ev) => {
-          const home = ev.home_team;
-          const away = ev.away_team;
-          const book = (ev.bookmakers || []).find((b) => b.key === "draftkings") || (ev.bookmakers || [])[0];
-          const market = (book?.markets || []).find((m) => m.key === "spreads");
-          const homeOutcome = (market?.outcomes || []).find((o) => o.name === home);
-          const homePoint = homeOutcome?.point;
-          const kickoffTime = toCST(ev.commence_time);
-          const kickoffISO = ev.commence_time || "";
-          return { home, away, homePoint, kickoffTime, kickoffISO };
-        })
-        .filter((g) => g.home && g.away && g.homePoint != null);
-
-      // Secondary fetch: ESPN scoreboard for TV network + team branding (best-effort, no API key needed)
-      const { networks: espnNetworks, teams: espnTeams, neutralGames } = await fetchEspnGameMetadata(from, to).catch(() => ({ networks: {}, teams: {}, neutralGames: new Set() }));
-
-      const withNetworks = merged.map((g) => {
-        const homeKey = g.home.toLowerCase();
-        const awayKey = g.away.toLowerCase();
-        const homeTeam = espnTeams[homeKey] || {};
-        const awayTeam = espnTeams[awayKey] || {};
-        // For cross-conference games keep both; same-conference collapses to one label
-        const homeConf = homeTeam.conference || "";
-        const awayConf = awayTeam.conference || "";
-        const conference = homeConf === awayConf ? homeConf : (homeConf || awayConf || "");
-        const neutralKey = [homeKey, awayKey].sort().join("__");
-        return {
-          away: g.away,
-          home: g.home,
-          favorite: g.homePoint < 0 ? "home" : "away",
-          spread: Math.abs(g.homePoint),
-          kickoffTime: g.kickoffTime,
-          kickoffISO: g.kickoffISO,
-          network: espnNetworks[homeKey] || espnNetworks[awayKey] || "",
-          homeLogo: homeTeam.logo || "",
-          awayLogo: awayTeam.logo || "",
-          homeColor: homeTeam.color || "",
-          awayColor: awayTeam.color || "",
-          conference,
-          homeConf,
-          awayConf,
-          awayRank: awayTeam.rank || null,
-          homeRank: homeTeam.rank || null,
-          neutral: neutralGames.has(neutralKey),
-          homeAbbr: homeTeam.abbreviation || teamAbbrev(g.home),
-          awayAbbr: awayTeam.abbreviation || teamAbbrev(g.away),
-        };
-      });
-
-      if (!withNetworks.length) {
-        setOddsError(
-          "No games with posted spreads in that date range. Sportsbooks usually post lines a few days before kickoff — try again closer to game day, or widen the date range."
-        );
-      } else {
-        // Store these dates so Results can auto-fetch scores later
-        setWeekDatesFrom(from);
-        setWeekDatesTo(to);
-        setImportPreview(withNetworks);
-        setImportSelected({});
-        setImportOpen(true);
-        setOddsOpen(false);
-      }
-    } catch (e) {
-      const networkIssue = e instanceof TypeError;
-      setOddsError(
-        networkIssue
-          ? "Couldn't reach The Odds API from this browser. Paste a list instead below, or run the standalone script."
-          : e.message || "Something went wrong fetching odds."
-      );
-    } finally {
-      setOddsBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    if (selectedWeek != null && !weekCache[selectedWeek]) {
-      loadWeek(selectedWeek, false);
-    } else if (selectedWeek != null && weekCache[selectedWeek] && !loadedExisting) {
-      setGames(weekCache[selectedWeek].games.map((g) => ({ ...g, spread: String(g.spread) })));
-      setWeekNumInput(String(selectedWeek));
-      const wd = weekCache[selectedWeek].weekDates;
-      if (wd) { setWeekDatesFrom(wd.from || ""); setWeekDatesTo(wd.to || ""); }
-      setLoadedExisting(true);
-    }
-  }, [selectedWeek, weekCache, loadWeek, loadedExisting]);
-
+  // ── week management ───────────────────────────────────────────────────────
   function startNew() {
     setSelectedWeek(null);
     setLoadedExisting(false);
@@ -4475,82 +4189,35 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     setImportSelected({});
     setConfirmingGames(null);
     setShowManualEntry(false);
-    setWizardStep(1);
-  }
-
-  function exitWizard() {
-    setWizardStep(null);
-    setImportPreview(null);
-    setImportSelected({});
-    setConfirmingGames(null);
-    setGames([]);
-    setShowManualEntry(false);
   }
 
   function startEdit(w) {
     setLoadedExisting(false);
     setSelectedWeek(w);
-    setWizardStep(null);
+    setImportPreview(null);
+    setImportSelected({});
+    setConfirmingGames(null);
+    setShowManualEntry(false);
   }
 
   function updateGame(idx, patch) {
     setGames((prev) => prev.map((g, i) => {
       if (i !== idx) return g;
       const updated = { ...g, ...patch };
-      // If team name changed, clear the stale logo/color from the previous Odds API import
-      if ("away" in patch && patch.away !== g.away) {
-        updated.awayLogo = null;
-        updated.awayColor = null;
-      }
-      if ("home" in patch && patch.home !== g.home) {
-        updated.homeLogo = null;
-        updated.homeColor = null;
-      }
+      if ("away" in patch && patch.away !== g.away) { updated.awayLogo = null; updated.awayColor = null; }
+      if ("home" in patch && patch.home !== g.home) { updated.homeLogo = null; updated.homeColor = null; }
       return updated;
     }));
   }
 
-  function addRow() {
-    setGames((prev) => [...prev, emptyGame()]);
-  }
-
-  function removeRow(idx) {
-    setGames((prev) => prev.filter((_, i) => i !== idx));
-  }
-
+  function addRow() { setGames((prev) => [...prev, emptyGame()]); }
+  function removeRow(idx) { setGames((prev) => prev.filter((_, i) => i !== idx)); }
 
   function applyImportSelection() {
     const chosen = importPreview.filter((_, i) => importSelected[i]);
     if (!chosen.length) return;
-
-    const DAY_ORDER = { thu: 0, fri: 1, sat: 2, sun: 3, mon: 4, tue: 5, wed: 6 };
-    function kickoffSortKey(t) {
-      if (!t) return 9999;
-      const lower = t.toLowerCase();
-      const dayMatch = lower.match(/^(mon|tue|wed|thu|fri|sat|sun)/);
-      const timeMatch = lower.match(/(\d+):(\d+)\s*(am|pm)/);
-      if (!dayMatch || !timeMatch) return 9999;
-      const day = DAY_ORDER[dayMatch[1]] ?? 9;
-      let hour = Number(timeMatch[1]);
-      const min = Number(timeMatch[2]);
-      const ampm = timeMatch[3];
-      if (ampm === "pm" && hour !== 12) hour += 12;
-      if (ampm === "am" && hour === 12) hour = 0;
-      return day * 10000 + hour * 100 + min;
-    }
-
-    const sorted = [...chosen].sort(
-      (a, b) => kickoffSortKey(a.kickoffTime) - kickoffSortKey(b.kickoffTime)
-    );
-
-    // Show confirmation modal instead of immediately going to the editor
-    setConfirmingGames(
-      sorted.map((g) => ({
-        ...g,
-        id: newId(),
-        spread: String(g.spread),
-      }))
-    );
+    const sorted = [...chosen].sort((a, b) => kickoffSortKey(a.kickoffTime) - kickoffSortKey(b.kickoffTime));
+    setConfirmingGames(sorted.map((g) => ({ ...g, id: newId(), spread: String(g.spread) })));
   }
 
   function handleConfirmGames() {
@@ -4559,233 +4226,48 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     setImportPreview(null);
     setImportSelected({});
     setConfirmingGames(null);
-    setShowManualEntry(false);
-    if (wizardStep === 2) setWizardStep(3);
   }
 
-  const valid =
-    weekNumInput.trim() &&
-    !isNaN(Number(weekNumInput)) &&
-    games.length > 0 &&
+  // ── odds api load key on mount ────────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      const saved = await safeGet("odds-api-key", false);
+      if (saved) { setOddsKeyInput(saved); setOddsKeySaved(true); }
+      setOddsKeyLoading(false);
+    })();
+  }, []);
+
+  // ── validation ────────────────────────────────────────────────────────────
+  const valid = weekNumInput.trim() && !isNaN(Number(weekNumInput)) && games.length > 0 &&
     games.every((g) => g.away.trim() && g.home.trim() && g.spread !== "" && !isNaN(Number(g.spread)));
 
   const currentWeekData = selectedWeek != null ? weekCache[selectedWeek] : null;
 
-  // Step indicator for wizard mode
-  function StepBar({ step }) {
-    const STEPS = [{ n: 1, label: "Week" }, { n: 2, label: "Select games" }, { n: 3, label: "Save" }];
-    const items = [];
-    STEPS.forEach((s, i) => {
-      items.push(
-        <div key={`step-${s.n}`} style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <div style={{
-            width: 24, height: 24, borderRadius: "50%",
-            background: step > s.n ? COLORS.gold : step === s.n ? "rgba(217,164,65,0.15)" : COLORS.fieldDeep,
-            border: `1px solid ${step > s.n ? COLORS.gold : step === s.n ? COLORS.gold : COLORS.lineStrong}`,
-            color: step > s.n ? COLORS.ink : step === s.n ? COLORS.goldBright : COLORS.muted,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: "0.7rem", fontWeight: 700, fontFamily: "var(--font-mono)", flexShrink: 0,
-          }}>
-            {step > s.n ? "✓" : s.n}
-          </div>
-          <span className="cfb-mono" style={{
-            fontSize: "0.65rem", textTransform: "uppercase", letterSpacing: "0.06em",
-            color: step === s.n ? COLORS.goldBright : step > s.n ? COLORS.muted : "#444",
-          }}>
-            {s.label}
-          </span>
-        </div>
-      );
-      if (i < STEPS.length - 1) {
-        items.push(<div key={`line-${i}`} style={{ flex: 1, height: 1, background: COLORS.line, margin: "0 10px" }} />);
-      }
-    });
-    return <div style={{ display: "flex", alignItems: "center", marginBottom: 20 }}>{items}</div>;
-  }
-
-  // Step 1: set week number
-  function Step1() {
-    return (
-      <div className="space-y-6 cfb-fade-in" style={{ maxWidth: 360 }}>
-        <div>
-          <div className="cfb-mono text-xs uppercase tracking-wider mb-2" style={{ color: COLORS.chalkDim }}>Week number</div>
-          <input
-            type="number"
-            value={weekNumInput}
-            onChange={(e) => setWeekNumInput(e.target.value)}
-            style={{
-              width: "100%", background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}`,
-              color: COLORS.chalk, padding: "10px 12px", fontSize: "1.5rem",
-              fontFamily: "var(--font-mono)", fontWeight: 700,
-            }}
-          />
-          <div className="cfb-mono text-xs mt-1" style={{ color: COLORS.muted }}>
-            Auto-set to {nextWeekNum} — change if needed
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <PrimaryButton onClick={() => setWizardStep(2)} disabled={!weekNumInput.trim() || isNaN(Number(weekNumInput))}>
-            <span className="flex items-center gap-1.5">Next — select games <ChevronRight size={14} /></span>
-          </PrimaryButton>
-          <button onClick={exitWizard} className="cfb-mono text-xs" style={{ color: COLORS.muted }}>Cancel</button>
-        </div>
-      </div>
-    );
-  }
-
-  // Step 2: fetch from Odds API (when no preview yet) or browse the import panel (when preview ready)
-  function Step2() {
-    if (importPreview) {
-      return <Step2Preview />;
+  useEffect(() => {
+    if (selectedWeek == null || loadedExisting) return;
+    const cached = weekCache[selectedWeek];
+    if (cached) {
+      setGames(cached.games || []);
+      setWeekNumInput(String(selectedWeek));
+      setWeekDatesFrom(cached.weekDates?.from || "");
+      setWeekDatesTo(cached.weekDates?.to || "");
+      setLoadedExisting(true);
+    } else {
+      loadWeek(selectedWeek, false);
     }
-    return (
-      <div className="space-y-5 cfb-fade-in">
-        {/* Primary: Odds API fetch */}
-        <div>
-          {/* API key (collapsed after saved) */}
-          {!oddsKeySaved && (
-            <div className="space-y-2 mb-4">
-              <div className="cfb-mono text-xs uppercase tracking-wider" style={{ color: COLORS.chalkDim }}>Odds API key</div>
-              <div className="flex gap-2">
-                <FieldInput
-                  type="password"
-                  value={oddsKeyInput}
-                  onChange={setOddsKeyInput}
-                  placeholder="Paste your key"
-                />
-                <SecondaryButton
-                  disabled={!oddsKeyInput.trim()}
-                  onClick={async () => {
-                    await storage.set("odds-api-key", oddsKeyInput.trim(), false).catch(() => null);
-                    setOddsKeySaved(true);
-                  }}
-                >Save</SecondaryButton>
-              </div>
-            </div>
-          )}
+  }, [selectedWeek, weekCache, loadedExisting, loadWeek]);
 
-          {/* Year/week — show advanced toggle if not already showing */}
-          {showAdvancedOdds ? (
-            <div className="space-y-3 mb-4">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>Year</div>
-                  <select value={oddsYear} onChange={(e) => setOddsYear(Number(e.target.value))}
-                    style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}>
-                    {[defaultYear - 1, defaultYear, defaultYear + 1].map((y) => <option key={y} value={y}>{y}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>Week</div>
-                  <select value={oddsWeek} onChange={(e) => setOddsWeek(Number(e.target.value))}
-                    style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}>
-                    {Array.from({ length: 16 }, (_, i) => i + 1).map((w) => <option key={w} value={w}>Week {w}</option>)}
-                  </select>
-                </div>
-              </div>
-              {oddsShowCustomRange && (
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>From</div>
-                    <FieldInput type="date" value={oddsFrom} onChange={setOddsFrom} />
-                  </div>
-                  <div>
-                    <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>To</div>
-                    <FieldInput type="date" value={oddsTo} onChange={setOddsTo} />
-                  </div>
-                </div>
-              )}
-              <button onClick={() => setOddsShowCustomRange((v) => !v)} className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.muted }}>
-                {oddsShowCustomRange ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-                {oddsShowCustomRange ? "hide custom date range" : "use custom date range (bowls / playoffs)"}
-              </button>
-            </div>
-          ) : (
-            <div className="cfb-mono text-xs mb-4 flex items-center gap-2" style={{ color: COLORS.muted }}>
-              <span style={{ color: COLORS.chalkDim }}>{oddsYear} · Week {oddsWeek}</span>
-              <button onClick={() => setShowAdvancedOdds(true)} style={{ color: COLORS.goldBright, textDecoration: "underline", fontSize: "0.7rem" }}>
-                change
-              </button>
-            </div>
-          )}
 
-          {oddsError && <div className="mb-3"><Banner onDismiss={() => setOddsError(null)}>{oddsError}</Banner></div>}
-
-          <PrimaryButton full onClick={fetchOddsApiWeek} disabled={oddsBusy}>
-            {oddsBusy ? "Fetching…" : `Fetch Week ${oddsWeek} games →`}
-          </PrimaryButton>
-        </div>
-
-        {/* Divider + manual entry */}
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "4px 0" }}>
-            <div style={{ flex: 1, height: 1, background: COLORS.line }} />
-            <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>or</span>
-            <div style={{ flex: 1, height: 1, background: COLORS.line }} />
-          </div>
-          {!showManualEntry ? (
-            <button onClick={() => setShowManualEntry(true)}
-              className="cfb-mono text-xs w-full text-center mt-3"
-              style={{ color: COLORS.chalkDim }}>
-              Enter games manually
-            </button>
-          ) : (
-            <div className="space-y-2 mt-3">
-              <div className="cfb-mono text-xs uppercase tracking-wider" style={{ color: COLORS.chalkDim }}>Manual games</div>
-              {games.map((g, idx) => (
-                <GameEditorRow key={g.id} g={g} idx={idx} updateGame={updateGame} removeRow={removeRow} />
-              ))}
-              <div className="flex items-center gap-3">
-                <SecondaryButton onClick={addRow}>
-                  <span className="flex items-center gap-1"><Plus size={12} /> Add game</span>
-                </SecondaryButton>
-                {games.length > 0 && games.some((g) => g.away.trim() && g.home.trim()) && (
-                  <PrimaryButton onClick={() => setWizardStep(3)}>
-                    <span className="flex items-center gap-1.5">Review {games.length} game{games.length === 1 ? "" : "s"} <ChevronRight size={14} /></span>
-                  </PrimaryButton>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        <button onClick={exitWizard} className="cfb-mono text-xs" style={{ color: COLORS.muted }}>← Cancel</button>
-      </div>
-    );
-  }
-
-  // Step 2 continued: the import preview split-pane
-  function Step2Preview() {
-    return <ImportPreviewPanel />;
-  }
-
-  // Step 3: review game list + save
-  function Step3() {
-    return (
-      <div className="space-y-3 cfb-fade-in">
-        <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
-          {games.length} game{games.length === 1 ? "" : "s"} · review and save
-        </div>
-        {games.map((g, idx) => (
-          <GameEditorRow key={g.id} g={g} idx={idx} updateGame={updateGame} removeRow={removeRow} />
-        ))}
-        <SecondaryButton onClick={addRow}>
-          <span className="flex items-center gap-1"><Plus size={12} /> Add game</span>
-        </SecondaryButton>
-      </div>
-    );
-  }
-
+  // ── render ────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* ── Game selection confirmation modal ── */}
+      {/* Confirmation modal */}
       {confirmingGames && (
         <>
           <div onClick={() => setConfirmingGames(null)}
             style={{ position: "fixed", inset: 0, zIndex: 200, background: "rgba(0,0,0,0.65)" }} />
           <div style={{
-            position: "fixed", zIndex: 201,
-            top: "50%", left: "50%", transform: "translate(-50%,-50%)",
+            position: "fixed", zIndex: 201, top: "50%", left: "50%", transform: "translate(-50%,-50%)",
             width: "min(92vw, 680px)", maxHeight: "80vh",
             background: COLORS.fieldDark, border: `1px solid ${COLORS.lineStrong}`,
             display: "flex", flexDirection: "column", borderRadius: 4,
@@ -4793,8 +4275,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
             <div className="cfb-mono flex items-center justify-between px-5 py-4"
               style={{ borderBottom: `1px solid ${COLORS.line}`, flexShrink: 0 }}>
               <div>
-                <div className="font-bold uppercase tracking-wider"
-                  style={{ color: COLORS.goldBright, fontSize: "0.85rem" }}>
+                <div className="font-bold uppercase tracking-wider" style={{ color: COLORS.goldBright, fontSize: "0.85rem" }}>
                   Week {weekNumInput} — {confirmingGames.length} game{confirmingGames.length === 1 ? "" : "s"}
                 </div>
                 <div style={{ fontSize: "0.7rem", color: COLORS.muted, marginTop: 2 }}>Review before adding to the pool</div>
@@ -4857,141 +4338,152 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     <div className="space-y-4">
       {/* ── Week navigation ── */}
       <div className="flex flex-wrap gap-2">
-        <SecondaryButton onClick={startNew}>
+        <SecondaryButton onClick={startNew} disabled={selectedWeek === null}>
           <span className="flex items-center gap-1"><Plus size={12} /> new week</span>
         </SecondaryButton>
-        {leagueMeta.weeks
-          .slice()
-          .sort((a, b) => b - a)
-          .map((w) => (
-            <div key={w} className="flex items-center gap-1">
-              <SecondaryButton onClick={() => startEdit(w)} disabled={selectedWeek === w && !wizardStep}>
-                edit wk {w}
-              </SecondaryButton>
-              {confirmDeleteWeek === w ? (
-                <>
-                  <button
-                    onClick={async () => {
-                      setConfirmDeleteWeek(null);
-                      if (selectedWeek === w) { setSelectedWeek(null); setLoadedExisting(false); }
-                      await deleteWeek(w);
-                    }}
-                    className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2"
-                    style={{ background: "rgba(179,55,42,0.2)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}
-                  >yes, delete</button>
-                  <button onClick={() => setConfirmDeleteWeek(null)}
-                    className="cfb-mono cfb-btn text-xs px-2.5 py-2"
-                    style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>cancel</button>
-                </>
-              ) : (
-                <button onClick={() => setConfirmDeleteWeek(w)} style={{ color: COLORS.muted }}>
-                  <Trash2 size={14} />
-                </button>
-              )}
-            </div>
-          ))}
+        {leagueMeta.weeks.slice().sort((a, b) => b - a).map((w) => (
+          <div key={w} className="flex items-center gap-1">
+            <SecondaryButton onClick={() => startEdit(w)} disabled={selectedWeek === w}>
+              edit wk {w}
+            </SecondaryButton>
+            {confirmDeleteWeek === w ? (
+              <>
+                <button onClick={async () => { setConfirmDeleteWeek(null); if (selectedWeek === w) { setSelectedWeek(null); setLoadedExisting(false); } await deleteWeek(w); }}
+                  className="cfb-mono cfb-btn text-xs font-bold px-2.5 py-2"
+                  style={{ background: "rgba(179,55,42,0.2)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}>yes, delete</button>
+                <button onClick={() => setConfirmDeleteWeek(null)}
+                  className="cfb-mono cfb-btn text-xs px-2.5 py-2"
+                  style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.muted }}>cancel</button>
+              </>
+            ) : (
+              <button onClick={() => setConfirmDeleteWeek(w)} style={{ color: COLORS.muted }}><Trash2 size={14} /></button>
+            )}
+          </div>
+        ))}
       </div>
 
-      {/* ── Wizard (new week creation) ── */}
-      {wizardStep ? (
-        <div className="cfb-fade-in">
-          {StepBar({ step: wizardStep })}
-          {wizardStep === 1 && Step1()}
-          {wizardStep === 2 && Step2()}
-          {wizardStep === 3 && (
-            <div className="space-y-3 cfb-fade-in">
-              <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
-                {games.length} game{games.length === 1 ? "" : "s"} · review and save
-              </div>
-              {games.map((g, idx) => (
-                <div key={g.id} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>game {String(idx + 1).padStart(2, "0")}</span>
-                    {games.length > 1 && (
-                      <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}><Trash2 size={14} /></button>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 mb-2">
-                    <FieldInput value={g.away} onChange={(v) => updateGame(idx, { away: v })} placeholder="Away team" />
-                    <FieldInput value={g.home} onChange={(v) => updateGame(idx, { home: v })} placeholder="Home team" />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 grid grid-cols-2 gap-1">
-                      <button onClick={() => updateGame(idx, { favorite: "away" })} className="cfb-mono text-xs px-2 py-2"
-                        style={{ background: g.favorite === "away" ? COLORS.gold : "transparent", color: g.favorite === "away" ? COLORS.ink : COLORS.chalkDim, border: `1px solid ${COLORS.lineStrong}` }}>
-                        fav: {g.away || "away"}
-                      </button>
-                      <button onClick={() => updateGame(idx, { favorite: "home" })} className="cfb-mono text-xs px-2 py-2"
-                        style={{ background: g.favorite === "home" ? COLORS.gold : "transparent", color: g.favorite === "home" ? COLORS.ink : COLORS.chalkDim, border: `1px solid ${COLORS.lineStrong}` }}>
-                        fav: {g.home || "home"}
-                      </button>
-                    </div>
-                    <div style={{ width: 84, flexShrink: 0 }}>
-                      <FieldInput type="number" value={g.spread} onChange={(v) => updateGame(idx, { spread: v })} placeholder="spread" />
-                    </div>
-                  </div>
-                  <div className="mt-1.5 flex items-center gap-2">
-                    <FieldInput value={g.kickoffTime || ""} onChange={(v) => updateGame(idx, { kickoffTime: v })} placeholder="Kickoff (e.g. Sat 11:00 AM CT)" />
-                    <button onClick={() => updateGame(idx, { neutral: !g.neutral })}
-                      className="cfb-mono text-xs px-2.5 py-2 flex-shrink-0 flex items-center gap-1.5"
-                      style={{ background: g.neutral ? "rgba(217,164,65,0.12)" : "transparent", border: `1px solid ${g.neutral ? COLORS.gold : COLORS.lineStrong}`, color: g.neutral ? COLORS.goldBright : COLORS.muted, whiteSpace: "nowrap" }}>
-                      ⚑ {g.neutral ? "neutral" : "@ site"}
-                    </button>
-                  </div>
-                  <div className="mt-1.5">
-                    <FieldInput value={g.network || ""} onChange={(v) => updateGame(idx, { network: v })} placeholder="Network (e.g. ABC, ESPN)" />
-                  </div>
-                </div>
-              ))}
-              <SecondaryButton onClick={addRow}>
-                <span className="flex items-center gap-1"><Plus size={12} /> add game</span>
-              </SecondaryButton>
-              <div style={{ position: "sticky", bottom: 0, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.line}`, paddingTop: 12, paddingBottom: 16, marginTop: 8, zIndex: 10 }}>
-                <PrimaryButton full disabled={!valid || busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    const wk = Number(weekNumInput);
-                    const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
-                    const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
-                    const ok = await saveWeekGames(wk, cleanGames, false, weekDates);
-                    setBusy(false);
-                    if (ok) { setSelectedWeek(wk); if (wizardStep) setWizardStep(null); }
-                  }}
-                >
-                  {busy ? "Saving..." : `Create Week ${weekNumInput}`}
-                </PrimaryButton>
-              </div>
-            </div>
-          )}
+      {/* ── Week number ── */}
+      <div>
+        <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>Week number</div>
+        <FieldInput type="number" value={weekNumInput} onChange={setWeekNumInput} placeholder="e.g. 1" />
+      </div>
+
+      {/* ── Lock / picks visibility (edit mode only) ── */}
+      {selectedWeek != null && currentWeekData && (
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => toggleLock(selectedWeek)}
+            className="cfb-mono cfb-btn text-xs font-semibold px-3 py-2 flex items-center gap-1.5"
+            style={{ background: currentWeekData.locked ? "rgba(217,164,65,0.16)" : "transparent", border: `1px solid ${currentWeekData.locked ? COLORS.gold : COLORS.lineStrong}`, color: currentWeekData.locked ? COLORS.goldBright : COLORS.chalkDim }}>
+            {currentWeekData.locked ? <><Lock size={12} /> locked — click to open</> : <><Unlock size={12} /> open — click to lock</>}
+          </button>
+          <button onClick={() => toggleHidePicksUntilKickoff(selectedWeek)}
+            className="cfb-mono cfb-btn text-xs font-semibold px-3 py-2 flex items-center gap-1"
+            style={{ background: currentWeekData.hidePicksUntilKickoff ? "rgba(217,164,65,0.16)" : "transparent", border: `1px solid ${currentWeekData.hidePicksUntilKickoff ? COLORS.gold : COLORS.lineStrong}`, color: currentWeekData.hidePicksUntilKickoff ? COLORS.goldBright : COLORS.chalkDim }}>
+            <Eye size={12} />
+            {currentWeekData.hidePicksUntilKickoff ? "picks hidden until kickoff — click to make visible" : "picks visible — click to hide until kickoff"}
+          </button>
         </div>
+      )}
 
-      ) : selectedWeek != null ? (
-        /* ── Edit existing week ── */
-        <div className="space-y-4 cfb-fade-in">
-          {currentWeekData && (
-            <div className="flex flex-wrap gap-2">
-              <button onClick={() => toggleLock(selectedWeek)}
-                className="cfb-mono cfb-btn text-xs font-semibold px-3 py-2 flex items-center gap-1.5"
-                style={{ background: currentWeekData.locked ? "rgba(217,164,65,0.16)" : "transparent", border: `1px solid ${currentWeekData.locked ? COLORS.gold : COLORS.lineStrong}`, color: currentWeekData.locked ? COLORS.goldBright : COLORS.chalkDim }}>
-                {currentWeekData.locked ? <><Lock size={12} /> locked — click to open</> : <><Unlock size={12} /> open — click to lock</>}
-              </button>
-              <button onClick={() => toggleHidePicksUntilKickoff(selectedWeek)}
-                className="cfb-mono cfb-btn text-xs font-semibold px-3 py-2 flex items-center gap-1"
-                style={{ background: currentWeekData.hidePicksUntilKickoff ? "rgba(217,164,65,0.16)" : "transparent", border: `1px solid ${currentWeekData.hidePicksUntilKickoff ? COLORS.gold : COLORS.lineStrong}`, color: currentWeekData.hidePicksUntilKickoff ? COLORS.goldBright : COLORS.chalkDim }}>
-                <Eye size={12} />
-                {currentWeekData.hidePicksUntilKickoff ? "picks hidden until kickoff — click to make visible" : "picks visible — click to hide until kickoff"}
-              </button>
+      {/* ── Pull from Odds API ── */}
+      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
+        <button onClick={() => setOddsOpen((o) => !o)}
+          className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5 w-full"
+          style={{ color: COLORS.goldBright }}>
+          <TrendingUp size={13} /> Pull from The Odds API
+          <span className="flex-1" />
+          {oddsOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        </button>
+
+        {oddsOpen && (
+          <div className="mt-3 space-y-3">
+            {/* API key */}
+            {oddsKeyLoading ? (
+              <Spinner label="Loading saved key..." />
+            ) : oddsKeySaved ? (
+              <div className="flex items-center justify-between">
+                <span className="cfb-mono text-xs" style={{ color: COLORS.chalkDim }}>API key saved on this device</span>
+                <button onClick={async () => { await storage.delete("odds-api-key", false).catch(() => null); setOddsKeyInput(""); setOddsKeySaved(false); }}
+                  className="cfb-mono text-xs" style={{ color: COLORS.muted }}>clear</button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-xs" style={{ color: COLORS.chalkDim }}>
+                  Paste your The Odds API key. It's saved only on this device, never shared.
+                </div>
+                <div className="flex gap-2">
+                  <FieldInput type="password" value={oddsKeyInput} onChange={setOddsKeyInput} placeholder="Paste key" />
+                  <PrimaryButton disabled={!oddsKeyInput.trim()} onClick={async () => { await storage.set("odds-api-key", oddsKeyInput.trim(), false).catch(() => null); setOddsKeySaved(true); }}>Save</PrimaryButton>
+                </div>
+              </div>
+            )}
+
+            {/* Year + week picker */}
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>year</div>
+                <select value={oddsYear} onChange={(e) => setOddsYear(Number(e.target.value))}
+                  style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}>
+                  {[defaultYear - 1, defaultYear, defaultYear + 1].map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
+              </div>
+              <div>
+                <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>week</div>
+                <select value={oddsWeek} onChange={(e) => setOddsWeek(Number(e.target.value))}
+                  style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px", fontSize: "0.85rem", fontFamily: "var(--font-mono)" }}>
+                  {Array.from({ length: 16 }, (_, i) => i + 1).map((w) => <option key={w} value={w}>Week {w}</option>)}
+                </select>
+              </div>
             </div>
-          )}
 
+            {/* Custom date range (bowls) */}
+            <button onClick={() => setOddsShowCustomRange((v) => !v)}
+              className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.muted }}>
+              {oddsShowCustomRange ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+              {oddsShowCustomRange ? "hide custom date range" : "use custom date range instead (bowls / playoffs)"}
+            </button>
+            {oddsShowCustomRange && (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>from date</div>
+                  <FieldInput type="date" value={oddsFrom} onChange={setOddsFrom} />
+                </div>
+                <div>
+                  <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>to date</div>
+                  <FieldInput type="date" value={oddsTo} onChange={setOddsTo} />
+                </div>
+              </div>
+            )}
+
+            {oddsError && <Banner onDismiss={() => setOddsError(null)}>{oddsError}</Banner>}
+            <PrimaryButton full onClick={fetchOddsApiWeek} disabled={oddsBusy}>
+              {oddsBusy ? "Fetching…" : oddsShowCustomRange ? "Fetch games in this range" : `Fetch ${oddsYear} Week ${oddsWeek} games`}
+            </PrimaryButton>
+          </div>
+        )}
+      </div>
+
+      {/* ── Import preview ── */}
+      {importPreview && <ImportPreviewPanel />}
+
+      {/* ── Manual entry (de-emphasized secondary option) ── */}
+      <div style={{ borderTop: `1px solid ${COLORS.line}`, paddingTop: 12 }}>
+        {!showManualEntry ? (
+          <button onClick={() => { setShowManualEntry(true); if (games.length === 0) addRow(); }}
+            className="cfb-mono text-xs flex items-center gap-1.5 w-full justify-center py-1"
+            style={{ color: COLORS.muted }}>
+            <Plus size={11} /> Enter games manually
+          </button>
+        ) : (
           <div className="space-y-2">
+            <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.muted, letterSpacing: "0.07em" }}>
+              Manual entry
+            </div>
             {games.map((g, idx) => (
               <div key={g.id} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
                 <div className="flex items-center justify-between mb-2">
                   <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>game {String(idx + 1).padStart(2, "0")}</span>
-                  {games.length > 1 && (
-                    <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}><Trash2 size={14} /></button>
-                  )}
+                  {games.length > 1 && <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}><Trash2 size={14} /></button>}
                 </div>
                 <div className="grid grid-cols-2 gap-2 mb-2">
                   <FieldInput value={g.away} onChange={(v) => updateGame(idx, { away: v })} placeholder="Away team" />
@@ -5025,33 +4517,55 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
                 </div>
               </div>
             ))}
+            <SecondaryButton onClick={addRow}>
+              <span className="flex items-center gap-1"><Plus size={12} /> add game</span>
+            </SecondaryButton>
           </div>
-          <SecondaryButton onClick={addRow}>
-            <span className="flex items-center gap-1"><Plus size={12} /> add game</span>
-          </SecondaryButton>
+        )}
+      </div>
 
-          <div style={{ position: "sticky", bottom: 0, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.line}`, paddingTop: 12, paddingBottom: 16, marginTop: 8, zIndex: 10 }}>
-            <PrimaryButton full disabled={!valid || busy}
-              onClick={async () => {
-                setBusy(true);
-                const wk = Number(weekNumInput);
-                const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
-                const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
-                const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false, weekDates);
-                setBusy(false);
-                if (ok) { setSelectedWeek(wk); if (wizardStep) setWizardStep(null); }
-              }}
-            >
-              {busy ? "Saving..." : "Save changes"}
-            </PrimaryButton>
+      {/* ── Week dates (for auto-grading) ── */}
+      <div className="px-3 py-3" style={{ border: `1px solid ${COLORS.line}` }}>
+        <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.chalkDim }}>
+          Game week dates <span style={{ fontWeight: "normal", textTransform: "none", letterSpacing: 0, color: COLORS.muted }}>— used to auto-fetch scores after games are played</span>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <div className="cfb-mono text-xs mb-1" style={{ color: COLORS.muted }}>from</div>
+            <FieldInput type="date" value={weekDatesFrom} onChange={setWeekDatesFrom} />
+          </div>
+          <div>
+            <div className="cfb-mono text-xs mb-1" style={{ color: COLORS.muted }}>to</div>
+            <FieldInput type="date" value={weekDatesTo} onChange={setWeekDatesTo} />
           </div>
         </div>
+        {!weekDatesFrom && (
+          <div className="text-xs mt-1.5" style={{ color: COLORS.muted }}>
+            Auto-fills when you import via The Odds API. Set manually if you enter games by hand.
+          </div>
+        )}
+      </div>
 
-      ) : null}
+      {/* ── Sticky save button ── */}
+      <div style={{ position: "sticky", bottom: 0, background: COLORS.fieldDark, borderTop: `1px solid ${COLORS.line}`, paddingTop: 12, paddingBottom: 16, marginTop: 8, zIndex: 10 }}>
+        <PrimaryButton full disabled={!valid || busy}
+          onClick={async () => {
+            setBusy(true);
+            const wk = Number(weekNumInput);
+            const cleanGames = games.map((g) => ({ ...g, spread: Number(g.spread) }));
+            const weekDates = weekDatesFrom && weekDatesTo ? { from: weekDatesFrom, to: weekDatesTo } : null;
+            const ok = await saveWeekGames(wk, cleanGames, currentWeekData?.locked || false, weekDates);
+            setBusy(false);
+            if (ok) setSelectedWeek(wk);
+          }}>
+          {busy ? "Saving..." : selectedWeek != null ? "Save changes" : "Create week"}
+        </PrimaryButton>
+      </div>
     </div>
     </>
   );
 }
+
 
 
 function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGradeWeek, picksCache, saveUnderdogResults }) {
