@@ -144,6 +144,40 @@ function winTotalCover(team) {
   return "push";
 }
 
+// Given a team's live record, determine its final win total OR whether the
+// over/under is already mathematically clinched.
+// record = { wins, losses, scheduled, completed }
+// Returns { finalWins, clinched, cover } where:
+//   - finalWins: the number to store (set when season done OR clinched); else null
+//   - clinched: true if over/under is decided before all games are played
+//   - cover: "over" | "under" | null (the decided side, if any)
+function winTotalClinch(line, record) {
+  if (!record || record.scheduled === 0) return { finalWins: null, clinched: false, cover: null };
+  const { wins, losses, scheduled, completed } = record;
+  const gamesRemaining = Math.max(0, scheduled - completed);
+  const maxPossibleWins = wins + gamesRemaining;
+
+  // Season fully played — final is known
+  if (gamesRemaining === 0) {
+    let cover = null;
+    if (wins > line) cover = "over";
+    else if (wins < line) cover = "under";
+    else cover = "push";
+    return { finalWins: wins, clinched: false, cover };
+  }
+
+  // Over clinched: already have more wins than the line
+  if (wins > line) {
+    return { finalWins: wins, clinched: true, cover: "over" };
+  }
+  // Under clinched: can't possibly reach the line
+  if (maxPossibleWins < line) {
+    return { finalWins: maxPossibleWins, clinched: true, cover: "under" };
+  }
+  // Still live
+  return { finalWins: null, clinched: false, cover: null };
+}
+
 // Convert American odds to the fractional "wins" payout for a correct pick.
 // −140 → 100/140 = 0.71 ; +114 → 114/100 = 1.14 ; even (+100/−100) → 1.00
 function oddsToWins(odds) {
@@ -1222,6 +1256,7 @@ export default function App() {
   // Win totals: board loads once (changes only when commissioner edits it),
   // picks use a real-time listener so everyone sees submissions as they happen.
   const winTotalsPicksListenerRef = useRef(null);
+  const winTotalsGradeThrottleRef = useRef({});
 
   useEffect(() => {
     if (winTotalsPicksListenerRef.current) {
@@ -1234,8 +1269,16 @@ export default function App() {
     // One-time fetch for the board
     loadWinTotals(selectedWinTotalsYear, false);
 
-    // Real-time listener for picks
+    // Auto-grade from ESPN records (throttled to once per 10 min per year)
     const year = selectedWinTotalsYear;
+    const gradeKey = `wt-autograde-${year}`;
+    const lastGrade = winTotalsGradeThrottleRef.current[gradeKey] || 0;
+    if (Date.now() - lastGrade > 10 * 60 * 1000) {
+      winTotalsGradeThrottleRef.current[gradeKey] = Date.now();
+      autoGradeWinTotals(year).catch(() => {});
+    }
+
+    // Real-time listener for picks
     const unsub = onSnapshot(
       query(collection(db, "winTotalsPicks"), where("wtYear", "==", year)),
       (snap) => {
@@ -1353,6 +1396,40 @@ export default function App() {
     }
     setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
     return true;
+  }
+
+  // Auto-grade win totals from ESPN records. For each team, fetch regular-season
+  // record and set finalWins when the total is clinched early or the season is done.
+  // Teams the commissioner has manually overridden (manualFinal === true) are left alone.
+  // Returns { updated, checked } counts, or null on failure.
+  async function autoGradeWinTotals(year) {
+    const board = winTotalsCache[year];
+    if (!board) return null;
+    let records;
+    try {
+      records = await fetchTeamRecords(year);
+    } catch {
+      return null;
+    }
+    let updated = 0;
+    const newTeams = board.teams.map((team) => {
+      if (team.manualFinal) return team; // respect manual override
+      const rec = records[team.school.toLowerCase()];
+      if (!rec) return team;
+      const { finalWins, clinched } = winTotalClinch(Number(team.line), rec);
+      if (finalWins != null && finalWins !== team.finalWins) {
+        updated++;
+        return { ...team, finalWins, clinchedEarly: clinched, liveRecord: rec };
+      }
+      // Store live record even if not yet decided (for display)
+      return { ...team, liveRecord: rec };
+    });
+    if (updated > 0 || newTeams.some((t, i) => t.liveRecord !== board.teams[i].liveRecord)) {
+      const payload = { ...board, teams: newTeams };
+      const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+      if (r) setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
+    }
+    return { updated, checked: board.teams.length };
   }
 
   /* ---------- playoff picks ---------- */
@@ -3790,6 +3867,7 @@ function CommishTab({
           winTotalsCache={winTotalsCache}
           loadWinTotals={loadWinTotals}
           saveWinTotalsResults={saveWinTotalsResults}
+          autoGradeWinTotals={autoGradeWinTotals}
         />
       )}
       {mode === "pBoard" && (
@@ -4243,6 +4321,49 @@ async function fetchFirstGameDates(year) {
     } catch { /* non-fatal */ }
   }
   return teamDates;
+}
+
+// Fetch each team's REGULAR-SEASON record + scheduled game count from ESPN.
+// Walks the full regular-season scoreboard (weeks 1–16, seasontype=2) and tallies,
+// per team: wins, losses, and total scheduled games. Conference championship games
+// (seasontype=3) and bowls/playoff (seasontype=4) are excluded by only requesting
+// seasontype=2. Returns { "alabama": { wins, losses, scheduled, completed }, ... }
+async function fetchTeamRecords(year) {
+  const records = {}; // lowerName -> { wins, losses, scheduled, completed }
+  function ensure(key) {
+    if (!records[key]) records[key] = { wins: 0, losses: 0, scheduled: 0, completed: 0 };
+    return records[key];
+  }
+  for (let week = 1; week <= 16; week++) {
+    try {
+      const res = await fetch(
+        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
+        `?seasontype=2&week=${week}&year=${year}&limit=200`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const event of data.events || []) {
+        const comp = event.competitions?.[0];
+        if (!comp) continue;
+        const status = comp.status?.type?.state; // "pre" | "in" | "post"
+        const completed = comp.status?.type?.completed === true;
+        const competitors = comp.competitors || [];
+        for (const c of competitors) {
+          const name = c.team?.displayName;
+          if (!name) continue;
+          const key = name.toLowerCase();
+          const rec = ensure(key);
+          rec.scheduled += 1; // this is a scheduled regular-season game
+          if (completed && status === "post") {
+            rec.completed += 1;
+            if (c.winner === true) rec.wins += 1;
+            else if (c.winner === false) rec.losses += 1;
+          }
+        }
+      }
+    } catch { /* non-fatal, continue to next week */ }
+  }
+  return records;
 }
 
 function getDatesInRange(fromDateStr, toDateStr) {  const dates = [];
@@ -5911,11 +6032,14 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
   );
 }
 
-function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsResults }) {
+function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsResults, autoGradeWinTotals }) {
   const years = leagueMeta.winTotalsYears || [];
   const [selectedYear, setSelectedYear] = useState(years.length ? Math.max(...years) : null);
   const [finals, setFinals] = useState({});
+  const [overrides, setOverrides] = useState({}); // team id -> true if commissioner is manually overriding
   const [busy, setBusy] = useState(false);
+  const [fetching, setFetching] = useState(false);
+  const [fetchNote, setFetchNote] = useState(null);
   const board = selectedYear != null ? winTotalsCache[selectedYear] : null;
 
   useEffect(() => {
@@ -5925,10 +6049,13 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
   useEffect(() => {
     if (board) {
       const init = {};
+      const ov = {};
       board.teams.forEach((t) => {
         init[t.id] = t.finalWins ?? "";
+        if (t.manualFinal) ov[t.id] = true;
       });
       setFinals(init);
+      setOverrides(ov);
     }
   }, [board?.year]);
 
@@ -5939,14 +6066,11 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
-        {years
-          .slice()
-          .sort((a, b) => b - a)
-          .map((y) => (
-            <SecondaryButton key={y} onClick={() => setSelectedYear(y)} disabled={selectedYear === y}>
-              {y}
-            </SecondaryButton>
-          ))}
+        {years.slice().sort((a, b) => b - a).map((y) => (
+          <SecondaryButton key={y} onClick={() => setSelectedYear(y)} disabled={selectedYear === y}>
+            {y}
+          </SecondaryButton>
+        ))}
       </div>
 
       {!board && <Spinner label="Loading board..." />}
@@ -5954,42 +6078,101 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
       {board && (
         <>
           <div className="text-xs" style={{ color: COLORS.muted }}>
-            Enter each team's final regular-season win count. Picks grade automatically as you fill these in.
+            Win totals grade automatically from ESPN — a pick locks in as soon as it's mathematically clinched
+            (e.g. a team at 10.5 taking enough losses that the over can't hit), otherwise at the end of the
+            regular season. You can override any team's final win count manually if ESPN is wrong.
           </div>
+
+          <div className="flex items-center gap-2">
+            <SecondaryButton
+              onClick={async () => {
+                setFetching(true);
+                setFetchNote(null);
+                const res = await autoGradeWinTotals(selectedYear);
+                setFetching(false);
+                if (res) setFetchNote(`Checked ${res.checked} teams · ${res.updated} newly graded`);
+                else setFetchNote("Couldn't reach ESPN — try again in a moment.");
+              }}
+              disabled={fetching}
+            >
+              <span className="flex items-center gap-1.5">
+                <RefreshCw size={12} className={fetching ? "animate-spin" : ""} />
+                {fetching ? "Fetching from ESPN…" : "Fetch results from ESPN now"}
+              </span>
+            </SecondaryButton>
+            {fetchNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{fetchNote}</span>}
+          </div>
+
           <div className="space-y-2">
-            {board.teams.map((t) => (
-              <div key={t.id} className="flex items-center gap-2 px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
-                <span className="text-sm flex-1 truncate">
-                  {t.school}{" "}
-                  <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
-                    ({t.conference}, line {t.line})
-                  </span>
-                </span>
-                <div style={{ width: 70, flexShrink: 0 }}>
-                  <FieldInput
-                    type="number"
-                    value={finals[t.id] ?? ""}
-                    onChange={(v) => setFinals((p) => ({ ...p, [t.id]: v }))}
-                    placeholder="wins"
-                  />
+            {board.teams.map((t) => {
+              const rec = t.liveRecord;
+              const cover = winTotalCover(t);
+              const isOverride = overrides[t.id];
+              let statusLabel = null;
+              let statusColor = COLORS.muted;
+              if (t.finalWins != null) {
+                if (t.clinchedEarly) { statusLabel = `clinched ${cover}`; statusColor = COLORS.goldBright; }
+                else if (cover === "push") { statusLabel = "push"; statusColor = COLORS.muted; }
+                else { statusLabel = `final: ${cover}`; statusColor = cover === "over" ? COLORS.goldBright : COLORS.chalkDim; }
+              } else if (rec) {
+                const remaining = Math.max(0, rec.scheduled - rec.completed);
+                statusLabel = `${rec.wins}-${rec.losses}${remaining ? ` · ${remaining} left` : ""}`;
+              }
+              return (
+                <div key={t.id} className="px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm flex-1 truncate">
+                      {t.school}{" "}
+                      <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                        ({t.conference}, {t.line})
+                      </span>
+                    </span>
+                    {statusLabel && !isOverride && (
+                      <span className="cfb-mono text-xs px-2 py-0.5" style={{ color: statusColor, border: `1px solid ${COLORS.line}` }}>
+                        {statusLabel}
+                      </span>
+                    )}
+                    {isOverride ? (
+                      <div style={{ width: 70, flexShrink: 0 }}>
+                        <FieldInput
+                          type="number"
+                          value={finals[t.id] ?? ""}
+                          onChange={(v) => setFinals((p) => ({ ...p, [t.id]: v }))}
+                          placeholder="wins"
+                        />
+                      </div>
+                    ) : null}
+                    <button
+                      onClick={() => setOverrides((p) => ({ ...p, [t.id]: !p[t.id] }))}
+                      className="cfb-mono text-xs px-2 py-1 flex-shrink-0"
+                      style={{ border: `1px solid ${COLORS.lineStrong}`, color: isOverride ? COLORS.goldBright : COLORS.muted }}
+                    >
+                      {isOverride ? "auto" : "override"}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+
           <PrimaryButton
             full
             disabled={busy}
             onClick={async () => {
               setBusy(true);
-              const teamsWithFinal = board.teams.map((t) => ({
-                ...t,
-                finalWins: finals[t.id] === "" || finals[t.id] == null ? null : Number(finals[t.id]),
-              }));
+              const teamsWithFinal = board.teams.map((t) => {
+                if (overrides[t.id]) {
+                  const v = finals[t.id];
+                  return { ...t, finalWins: v === "" || v == null ? null : Number(v), manualFinal: true, clinchedEarly: false };
+                }
+                // leave auto-graded values as-is; clear any prior manual flag
+                return { ...t, manualFinal: false };
+              });
               await saveWinTotalsResults(selectedYear, teamsWithFinal);
               setBusy(false);
             }}
           >
-            {busy ? "Saving..." : "Save results"}
+            {busy ? "Saving..." : "Save manual overrides"}
           </PrimaryButton>
         </>
       )}
