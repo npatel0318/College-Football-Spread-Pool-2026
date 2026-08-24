@@ -144,8 +144,31 @@ function winTotalCover(team) {
   return "push";
 }
 
+// Convert American odds to the fractional "wins" payout for a correct pick.
+// −140 → 100/140 = 0.71 ; +114 → 114/100 = 1.14 ; even (+100/−100) → 1.00
+function oddsToWins(odds) {
+  const n = Number(odds);
+  if (!n || isNaN(n)) return 1; // default to even money if missing
+  if (n > 0) return n / 100;
+  return 100 / Math.abs(n);
+}
+
+// The payout a member stands to gain for a given pick side, given the team's odds.
+function pickPayout(team, side) {
+  if (!team) return 1;
+  const odds = side === "over" ? team.overOdds : team.underOdds;
+  return oddsToWins(odds);
+}
+
+// Format American odds for display: always show the sign
+function formatOdds(odds) {
+  const n = Number(odds);
+  if (!n || isNaN(n)) return "even";
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
 function newWinTotalsTeam() {
-  return { id: newId(), school: "", conference: "ACC", line: "" };
+  return { id: newId(), school: "", conference: "ACC", line: "", overOdds: "", underOdds: "" };
 }
 
 const PLAYOFF_SLOTS = [
@@ -1564,8 +1587,8 @@ export default function App() {
             if (!team) return;
             const cover = winTotalCover(team);
             if (!cover || cover === "push") return;
-            if (p.side === cover) wins++;
-            else losses++;
+            if (p.side === cover) wins += pickPayout(team, p.side); // weighted by odds
+            else losses += 1;
           });
           results[member].winTotalsWins = wins;
           results[member].winTotalsLosses = losses;
@@ -3534,12 +3557,14 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
                   <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">{r.weeklyWins}-{r.weeklyLosses}</td>
                   {hasWinTotals && (
-                    <td className="px-3 py-2 text-right whitespace-nowrap">{r.winTotalsWins}-{r.winTotalsLosses}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{r.winTotalsWins.toFixed(2)}-{r.winTotalsLosses}</td>
                   )}
                   {hasPlayoff && (
                     <td className="px-3 py-2 text-right whitespace-nowrap">{r.playoffWins}-{r.playoffLosses}</td>
                   )}
-                  <td className="px-3 py-2 text-right font-bold whitespace-nowrap">{r.totalWins}-{r.totalLosses}</td>
+                  <td className="px-3 py-2 text-right font-bold whitespace-nowrap">
+                    {Number.isInteger(r.totalWins) ? r.totalWins : r.totalWins.toFixed(2)}-{r.totalLosses}
+                  </td>
                   <td className="px-3 py-2 text-right">{r.weeksWon}</td>
                 </tr>
               ))}
@@ -5321,19 +5346,25 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
   const leaderboardRows = Object.values(picksForYear)
     .filter((p) => p?.name)
     .map((p) => {
-      let correct = 0;
+      let winsGained = 0; // weighted by odds
+      let losses = 0;     // full 1.0 per wrong pick
       let graded = 0;
+      let pushes = 0;
       (p.picks || []).forEach((pick) => {
         const team = teamsById[pick.teamId];
         if (!team) return;
         const cover = winTotalCover(team);
         if (!cover) return;
         graded++;
-        if (cover !== "push" && pick.side === cover) correct++;
+        if (cover === "push") { pushes++; return; }
+        if (pick.side === cover) winsGained += pickPayout(team, pick.side);
+        else losses += 1;
       });
-      return { name: p.name, correct, graded };
+      const net = winsGained - losses;
+      return { name: p.name, winsGained, losses, graded, pushes, net };
     })
-    .sort((a, b) => b.correct - a.correct);
+    // Rank by net (wins gained − losses), tiebreak by fewer losses
+    .sort((a, b) => (b.net - a.net) || (a.losses - b.losses));
 
   return (
     <div className="cfb-fade-in space-y-4">
@@ -5421,6 +5452,9 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
                 {options.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.school} ({t.conference}) — {t.line}
+                    {(t.overOdds != null && t.overOdds !== "") || (t.underOdds != null && t.underOdds !== "") ? (
+                      <span style={{ color: COLORS.muted }}> · O {formatOdds(t.overOdds)} / U {formatOdds(t.underOdds)}</span>
+                    ) : null}
                   </option>
                 ))}
               </select>
@@ -5448,6 +5482,8 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
                         borderColor = COLORS.red;
                       }
                     }
+                    const sideOdds = side === "over" ? team.overOdds : team.underOdds;
+                    const payout = pickPayout(team, side);
                     return (
                       <button
                         key={side}
@@ -5456,10 +5492,13 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
                           updateSlot(slot.key, { side });
                           autoSaveSlot(slot.key, side);
                         }}
-                        className="cfb-btn px-2.5 py-2 text-sm font-semibold capitalize"
-                        style={{ background: bg, border: `1px solid ${borderColor}`, color: textColor, cursor: disabled ? "default" : "pointer" }}
+                        className="cfb-btn px-2.5 py-2 font-semibold capitalize"
+                        style={{ background: bg, border: `1px solid ${borderColor}`, color: textColor, cursor: disabled ? "default" : "pointer", textAlign: "left" }}
                       >
-                        {side} {team.line}
+                        <div className="text-sm">{side} {team.line}</div>
+                        <div className="cfb-mono" style={{ fontSize: "0.62rem", opacity: 0.8, marginTop: 1 }}>
+                          {formatOdds(sideOdds)} · +{payout.toFixed(2)} win{payout === 1 ? "" : "s"}
+                        </div>
                       </button>
                     );
                   })}
@@ -5492,19 +5531,23 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
                   <tr style={{ background: COLORS.fieldDeep }}>
                     <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
                     <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
-                    <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>correct</th>
-                    <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>graded</th>
+                    <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>wins</th>
+                    <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>losses</th>
+                    <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>net</th>
                   </tr>
                 </thead>
                 <tbody>
                   {leaderboardRows.map((r, i) => (
                     <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
                       <td className="px-3 py-2" style={{ color: i === 0 ? COLORS.gold : COLORS.muted }}>
-                        {i === 0 && r.correct > 0 ? <Trophy size={14} /> : i + 1}
+                        {i === 0 && r.graded > 0 ? <Trophy size={14} /> : i + 1}
                       </td>
                       <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
-                      <td className="px-3 py-2 text-right">{r.correct}</td>
-                      <td className="px-3 py-2 text-right">{r.graded}/6</td>
+                      <td className="px-3 py-2 text-right" style={{ color: COLORS.goldBright }}>{r.winsGained.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-right" style={{ color: COLORS.redBright }}>{r.losses}</td>
+                      <td className="px-3 py-2 text-right font-bold" style={{ color: r.net >= 0 ? COLORS.goldBright : COLORS.redBright }}>
+                        {r.net >= 0 ? "+" : ""}{r.net.toFixed(2)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -5550,16 +5593,29 @@ function WinTotalsGrid({ leagueMeta, board, picksCache, slugToName }) {
                   const pdoc = picksCache[slugM];
                   const pick = (pdoc?.picks || []).find((p) => p.slotKey === slot.key);
                   const team = pick ? teamsById[pick.teamId] : null;
-                  const label = team ? `${team.school} ${pick.side} ${team.line}` : "—";
                   let color = COLORS.chalkDim;
+                  let cover = null;
                   if (team) {
-                    const cover = winTotalCover(team);
+                    cover = winTotalCover(team);
                     if (cover === "push") color = COLORS.muted;
                     else if (cover) color = pick.side === cover ? COLORS.goldBright : COLORS.redBright;
                   }
                   return (
                     <td key={m} className="px-2 py-1.5 whitespace-nowrap" style={{ color }}>
-                      {label}
+                      {team ? (
+                        <>
+                          <div>{team.school} {pick.side} {team.line}</div>
+                          <div style={{ fontSize: "0.6rem", color: COLORS.muted, marginTop: 1 }}>
+                            {cover && cover !== "push"
+                              ? (pick.side === cover
+                                  ? `+${pickPayout(team, pick.side).toFixed(2)} ✓`
+                                  : `−1.00 ✕`)
+                              : cover === "push"
+                              ? "push · 0"
+                              : `+${pickPayout(team, pick.side).toFixed(2)} if hit`}
+                          </div>
+                        </>
+                      ) : "—"}
                     </td>
                   );
                 })}
@@ -5589,7 +5645,7 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
     if (selectedYear != null && !winTotalsCache[selectedYear]) {
       loadWinTotals(selectedYear, false);
     } else if (selectedYear != null && winTotalsCache[selectedYear] && !loadedExisting) {
-      setTeams(winTotalsCache[selectedYear].teams.map((t) => ({ ...t, line: String(t.line) })));
+      setTeams(winTotalsCache[selectedYear].teams.map((t) => ({ ...t, line: String(t.line), overOdds: t.overOdds != null ? String(t.overOdds) : "", underOdds: t.underOdds != null ? String(t.underOdds) : "" })));
       setYearInput(String(selectedYear));
       setLoadedExisting(true);
     }
@@ -5645,7 +5701,14 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
           );
         }
         const existingId = existingByName[normalizeTeam(t.school)];
-        return { id: existingId || newId(), school: String(t.school), conference: conf, line: String(t.line) };
+        return {
+          id: existingId || newId(),
+          school: String(t.school),
+          conference: conf,
+          line: String(t.line),
+          overOdds: t.overOdds != null ? String(t.overOdds) : "",
+          underOdds: t.underOdds != null ? String(t.underOdds) : "",
+        };
       });
       setTeams(cleaned);
       setImportText("");
@@ -5727,7 +5790,7 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
               rows={5}
               className="cfb-mono text-base sm:text-xs w-full p-2"
               style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
-              placeholder='[{"school":"Ohio State","conference":"Big Ten","line":10.5}, {"school":"Georgia","conference":"SEC","line":9.5}]'
+              placeholder='[{"school":"Ohio State","conference":"Big Ten","line":9.5,"overOdds":-120,"underOdds":100}, {"school":"SMU","conference":"ACC","line":8.5,"overOdds":-140,"underOdds":114}]'
             />
             {importError && <Banner onDismiss={() => setImportError(null)}>{importError}</Banner>}
             <SecondaryButton onClick={handleParseImport} disabled={!importText.trim()}>
@@ -5775,7 +5838,7 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
         onClick={async () => {
           setBusy(true);
           const yr = Number(yearInput);
-          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), conference: t.conference, line: Number(t.line) }));
+          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), conference: t.conference, line: Number(t.line), overOdds: t.overOdds !== "" ? Number(t.overOdds) : null, underOdds: t.underOdds !== "" ? Number(t.underOdds) : null }));
           const ok = await saveWinTotalsBoard(yr, cleanTeams, currentBoard?.locked || false);
           setBusy(false);
           if (ok) setSelectedYear(yr);
