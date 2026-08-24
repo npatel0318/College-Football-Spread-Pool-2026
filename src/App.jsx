@@ -2138,13 +2138,6 @@ export default function App() {
               playing as
             </div>
             <div className="text-sm font-semibold">{myName}</div>
-            <button
-              onClick={switchIdentity}
-              className="cfb-mono text-xs flex items-center gap-1 mt-1 opacity-70 hover:opacity-100"
-              style={{ color: COLORS.chalkDim }}
-            >
-              <LogOut size={12} /> switch
-            </button>
           </div>
         </div>
 
@@ -2296,7 +2289,6 @@ export default function App() {
             unfinalizeSeasonPayouts={unfinalizeSeasonPayouts}
             historyData={historyData}
             saveHistoryData={saveHistoryData}
-            resetAllData={resetAllData}
             deleteWeek={deleteWeek}
             deleteMember={deleteMember}
             addMember={addMember}
@@ -3752,7 +3744,6 @@ function CommishTab({
   unfinalizeSeasonPayouts,
   historyData,
   saveHistoryData,
-  resetAllData,
   deleteWeek,
   deleteMember,
   addMember,
@@ -3761,9 +3752,6 @@ function CommishTab({
 }) {
   const [mode, setMode] = useState("games");
   const [editingWeek, setEditingWeek] = useState(null);
-  const [resetOpen, setResetOpen] = useState(false);
-  const [resetConfirming, setResetConfirming] = useState(false);
-  const [resetting, setResetting] = useState(false);
   const [isDesktop, setIsDesktop] = useState(
     typeof window !== "undefined" && window.innerWidth >= 768
   );
@@ -3911,48 +3899,6 @@ function CommishTab({
     </div>
   );
 
-  // Danger zone — shown at the bottom of the content area in both layouts
-  const dangerZone = (
-    <div className="pt-4 mt-6" style={{ borderTop: `1px solid ${COLORS.line}` }}>
-      <button
-        onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
-        className="cfb-mono text-xs uppercase tracking-wider flex items-center gap-1.5"
-        style={{ color: COLORS.redBright }}
-      >
-        <AlertCircle size={13} /> Danger zone (testing only)
-      </button>
-      {resetOpen && (
-        <div className="mt-3 p-3 space-y-3" style={{ background: "rgba(179,55,42,0.08)", border: `1px solid ${COLORS.red}` }}>
-          <div className="text-sm" style={{ color: COLORS.chalk }}>
-            Permanently deletes every member, week, pick, win totals board, and playoff board, and resets money settings and season payouts. League name and passcode are kept. Remove this before opening the pool to real members.
-          </div>
-          {!resetConfirming ? (
-            <SecondaryButton onClick={() => setResetConfirming(true)} disabled={resetting}>
-              Reset all data
-            </SecondaryButton>
-          ) : (
-            <div className="space-y-2">
-              <div className="text-sm font-semibold" style={{ color: COLORS.redBright }}>
-                Are you sure? This can't be undone.
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={async () => { setResetting(true); await resetAllData(); setResetting(false); }}
-                  disabled={resetting}
-                  className="cfb-mono cfb-btn text-xs font-bold uppercase tracking-wider px-3 py-2"
-                  style={{ background: COLORS.red, color: COLORS.chalk, border: `1px solid ${COLORS.red}`, opacity: resetting ? 0.6 : 1 }}
-                >
-                  {resetting ? "Deleting everything..." : "Yes, delete everything"}
-                </button>
-                <SecondaryButton onClick={() => setResetConfirming(false)} disabled={resetting}>Cancel</SecondaryButton>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-
   return (
     <div className="cfb-fade-in">
       {/* Header */}
@@ -4008,23 +3954,11 @@ function CommishTab({
                 })}
               </div>
             ))}
-
-            {/* Danger zone at bottom of sidebar */}
-            <div style={{ marginTop: "auto", borderTop: `1px solid ${COLORS.line}`, padding: "14px 16px 16px" }}>
-              <button
-                onClick={() => { setResetOpen((o) => !o); setResetConfirming(false); }}
-                className="cfb-mono text-xs flex items-center gap-1.5"
-                style={{ color: COLORS.red, opacity: 0.55 }}
-              >
-                <AlertCircle size={12} /> Danger zone
-              </button>
-            </div>
           </div>
 
           {/* Content area — takes remaining space, no border box */}
           <div style={{ flex: 1, minWidth: 0, padding: "24px 32px", overflowY: "auto" }}>
             {modeContent}
-            {resetOpen && dangerZone}
           </div>
         </div>
       ) : (
@@ -4060,7 +3994,6 @@ function CommishTab({
           </div>
 
           {modeContent}
-          {dangerZone}
         </>
       )}
     </div>
