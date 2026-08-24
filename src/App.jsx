@@ -1193,11 +1193,45 @@ export default function App() {
     }
   }, []);
 
+  // Win totals: board loads once (changes only when commissioner edits it),
+  // picks use a real-time listener so everyone sees submissions as they happen.
+  const winTotalsPicksListenerRef = useRef(null);
+
   useEffect(() => {
-    if (phase === "app" && selectedWinTotalsYear != null && activeTab === "wintotals") {
-      loadWinTotals(selectedWinTotalsYear, true);
+    if (winTotalsPicksListenerRef.current) {
+      winTotalsPicksListenerRef.current();
+      winTotalsPicksListenerRef.current = null;
     }
-  }, [phase, selectedWinTotalsYear, activeTab, loadWinTotals]);
+
+    if (phase !== "app" || selectedWinTotalsYear == null || activeTab !== "wintotals") return;
+
+    // One-time fetch for the board
+    loadWinTotals(selectedWinTotalsYear, false);
+
+    // Real-time listener for picks
+    const year = selectedWinTotalsYear;
+    const unsub = onSnapshot(
+      query(collection(db, "winTotalsPicks"), where("wtYear", "==", year)),
+      (snap) => {
+        const picksObj = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          if (!data.slug || !data.value) return;
+          try { picksObj[data.slug] = JSON.parse(data.value); } catch {}
+        });
+        setWinTotalsPicksCache((prev) => ({ ...prev, [year]: picksObj }));
+      },
+      (err) => console.error("Win totals picks listener error:", err)
+    );
+
+    winTotalsPicksListenerRef.current = unsub;
+    return () => {
+      if (winTotalsPicksListenerRef.current) {
+        winTotalsPicksListenerRef.current();
+        winTotalsPicksListenerRef.current = null;
+      }
+    };
+  }, [phase, selectedWinTotalsYear, activeTab]);
 
   async function saveWinTotalsPicks(year, picks) {
     const mySlug = slugify(myName);
@@ -5249,10 +5283,11 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
     setSelections((prev) => ({ ...prev, [slotKey]: { ...prev[slotKey], ...patch } }));
   }
 
-  const allFilled = WT_SLOTS.every((s) => selections[s.key]?.teamId && selections[s.key]?.side);
-  const conferenceOk = WT_SLOTS.filter((s) => s.conference).every((s) => {
+  // Partial picks allowed — validate only the slots the member has filled in
+  const filledSlots = WT_SLOTS.filter((s) => selections[s.key]?.teamId && selections[s.key]?.side);
+  const conferenceOk = WT_SLOTS.filter((s) => s.conference && selections[s.key]?.teamId).every((s) => {
     const sel = selections[s.key];
-    if (!sel) return false;
+    if (!sel?.teamId) return true; // unfilled slots don't need validation
     const team = teamsById[sel.teamId];
     return team && normalizeConf(team.conference) === s.conference;
   });
@@ -5260,7 +5295,7 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
     const ids = WT_SLOTS.map((s) => selections[s.key]?.teamId).filter(Boolean);
     return new Set(ids).size === ids.length;
   })();
-  const canSubmit = allFilled && conferenceOk && noDuplicates;
+  const canSubmit = filledSlots.length > 0 && conferenceOk && noDuplicates;
 
   const picksForYear = picksCache[selectedYear] || {};
   const submittedCount = Object.values(picksForYear).filter((v) => v && (v.picks || []).length > 0).length;
@@ -5431,20 +5466,27 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
               disabled={!canSubmit || saving}
               onClick={async () => {
                 setSaving(true);
-                const picks = WT_SLOTS.map((s) => ({
-                  slotKey: s.key,
-                  teamId: selections[s.key].teamId,
-                  side: selections[s.key].side,
-                }));
+                const picks = WT_SLOTS
+                  .filter((s) => selections[s.key]?.teamId && selections[s.key]?.side)
+                  .map((s) => ({
+                    slotKey: s.key,
+                    teamId: selections[s.key].teamId,
+                    side: selections[s.key].side,
+                  }));
                 await saveWinTotalsPicks(selectedYear, picks);
                 setSaving(false);
               }}
             >
-              {saving ? "Saving..." : "Save my picks"}
+              {saving ? "Saving..." : `Save ${filledSlots.length} pick${filledSlots.length === 1 ? "" : "s"}`}
             </PrimaryButton>
-            {!canSubmit && (
+            {!canSubmit && filledSlots.length === 0 && (
               <div className="text-xs" style={{ color: COLORS.muted }}>
-                Fill all 6 picks (one per Power 4 conference, plus 2 wildcards) with no repeated teams to save.
+                Select a team and pick over or under to save.
+              </div>
+            )}
+            {!canSubmit && filledSlots.length > 0 && !noDuplicates && (
+              <div className="text-xs" style={{ color: COLORS.muted }}>
+                You've selected the same team more than once.
               </div>
             )}
           </>
