@@ -1385,11 +1385,43 @@ export default function App() {
     }
   }, []);
 
+  // Playoff: board loads once, picks use a real-time listener so everyone
+  // sees submissions as they happen (same pattern as weekly picks / win totals).
+  const playoffPicksListenerRef = useRef(null);
+
   useEffect(() => {
-    if (phase === "app" && selectedPlayoffYear != null && activeTab === "playoff") {
-      loadPlayoff(selectedPlayoffYear, true);
+    if (playoffPicksListenerRef.current) {
+      playoffPicksListenerRef.current();
+      playoffPicksListenerRef.current = null;
     }
-  }, [phase, selectedPlayoffYear, activeTab, loadPlayoff]);
+
+    if (phase !== "app" || selectedPlayoffYear == null || activeTab !== "playoff") return;
+
+    loadPlayoff(selectedPlayoffYear, false); // one-time board fetch
+
+    const year = selectedPlayoffYear;
+    const unsub = onSnapshot(
+      query(collection(db, "playoffPicks"), where("pYear", "==", year)),
+      (snap) => {
+        const picksObj = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          if (!data.slug || !data.value) return;
+          try { picksObj[data.slug] = JSON.parse(data.value); } catch {}
+        });
+        setPlayoffPicksCache((prev) => ({ ...prev, [year]: picksObj }));
+      },
+      (err) => console.error("Playoff picks listener error:", err)
+    );
+
+    playoffPicksListenerRef.current = unsub;
+    return () => {
+      if (playoffPicksListenerRef.current) {
+        playoffPicksListenerRef.current();
+        playoffPicksListenerRef.current = null;
+      }
+    };
+  }, [phase, selectedPlayoffYear, activeTab]);
 
   async function savePlayoffPicks(year, picks) {
     const mySlug = slugify(myName);
@@ -1410,6 +1442,20 @@ export default function App() {
 
   async function savePlayoffBoard(year, teams, locked) {
     const existing = playoffCache[year];
+
+    // Auto-fetch first-game kickoff dates from ESPN so picks can lock per-team
+    const existingDates = {};
+    if (existing) {
+      existing.teams.forEach((t) => {
+        if (t.firstGameISO) existingDates[t.school.toLowerCase()] = t.firstGameISO;
+      });
+    }
+    const anyMissing = teams.some((t) => !existingDates[t.school.toLowerCase()]);
+    let espnDates = {};
+    if (anyMissing) {
+      try { espnDates = await fetchFirstGameDates(year); } catch { /* non-fatal */ }
+    }
+
     let payload;
     if (existing) {
       const finalMap = {};
@@ -1417,10 +1463,22 @@ export default function App() {
       payload = {
         year,
         locked,
-        teams: teams.map((t) => ({ ...t, madePlayoff: finalMap[t.id] ?? null })),
+        teams: teams.map((t) => ({
+          ...t,
+          madePlayoff: finalMap[t.id] ?? null,
+          firstGameISO: existingDates[t.school.toLowerCase()] || espnDates[t.school.toLowerCase()] || null,
+        })),
       };
     } else {
-      payload = { year, locked, teams: teams.map((t) => ({ ...t, madePlayoff: null })) };
+      payload = {
+        year,
+        locked,
+        teams: teams.map((t) => ({
+          ...t,
+          madePlayoff: null,
+          firstGameISO: espnDates[t.school.toLowerCase()] || null,
+        })),
+      };
     }
     const r = await storage.set(`playoff:${year}:board`, JSON.stringify(payload), true).catch(() => null);
     if (!r) {
@@ -6060,15 +6118,29 @@ function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading,
         {PLAYOFF_SLOTS.map((slot) => {
           const teamId = selections[slot.key];
           const team = teamId ? teamsById[teamId] : null;
-          const options = tierOptions(slot.tier).filter((t) => !usedTeamIds.has(t.id) || t.id === teamId);
-          const disabled = board.locked;
+          // Per-team lock: if the selected team's first game has kicked off, freeze this slot
+          const teamKickedOff = team?.firstGameISO && Date.now() >= new Date(team.firstGameISO).getTime();
+          const disabled = board.locked || teamKickedOff;
+          // Exclude teams whose season has already started from the dropdown
+          const options = tierOptions(slot.tier).filter(
+            (t) =>
+              (!usedTeamIds.has(t.id) || t.id === teamId) &&
+              (!t.firstGameISO || Date.now() < new Date(t.firstGameISO).getTime() || t.id === teamId)
+          );
           let resultColor = null;
           if (team && team.madePlayoff != null) {
             resultColor = team.madePlayoff ? COLORS.goldBright : COLORS.redBright;
           }
           return (
             <div key={slot.key} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
-              <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.gold }}>{slot.label}</div>
+              <div className="cfb-mono text-xs uppercase mb-2 flex items-center justify-between">
+                <span style={{ color: COLORS.gold }}>{slot.label}</span>
+                {teamKickedOff && (
+                  <span className="flex items-center gap-1" style={{ color: COLORS.muted, textTransform: "none" }}>
+                    <Lock size={10} /> locked — season started
+                  </span>
+                )}
+              </div>
               <select
                 disabled={disabled}
                 value={teamId || ""}
@@ -6129,14 +6201,11 @@ function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading,
         </>
       )}
 
-      {board.locked && (
-        <>
-          <PlayoffGrid leagueMeta={leagueMeta} board={board} picksCache={picksForYear} slugToName={slugToName} />
-          <div className="text-xs" style={{ color: COLORS.muted }}>
-            Correct picks count toward your total on the Standings tab.
-          </div>
-        </>
-      )}
+      {/* Everyone's picks — always visible */}
+      <PlayoffGrid leagueMeta={leagueMeta} board={board} picksCache={picksForYear} slugToName={slugToName} />
+      <div className="text-xs" style={{ color: COLORS.muted }}>
+        Correct picks count toward your total on the Standings tab.
+      </div>
     </div>
   );
 }
