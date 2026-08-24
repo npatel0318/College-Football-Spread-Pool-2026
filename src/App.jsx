@@ -181,7 +181,7 @@ const PLAYOFF_SLOTS = [
 ];
 
 function newPlayoffTeam() {
-  return { id: newId(), school: "", odds: "" };
+  return { id: newId(), school: "", odds: "", tier: 1 };
 }
 
 const DEFAULT_MONEY_SETTINGS = {
@@ -237,19 +237,21 @@ function fmtMoney(n) {
   return `${sign}$${Math.abs(n).toFixed(2).replace(/\.00$/, "")}`;
 }
 
-// Splits teams into 3 roughly-even tiers by best (lowest positive) odds first.
+// Groups teams by their manually-assigned tier property.
 // Returns { tiersById: {teamId: 1|2|3}, tier1: [...], tier2: [...], tier3: [...] }
+// Within each tier, teams are ordered by best (lowest positive) odds.
 function computePlayoffTiers(teams) {
-  const sorted = teams
-    .filter((t) => Number(t.odds) > 0)
-    .slice()
-    .sort((a, b) => Number(a.odds) - Number(b.odds));
-  const n = sorted.length;
-  const tier1Size = Math.ceil(n / 3);
-  const tier2Size = Math.ceil((n - tier1Size) / 2);
-  const tier1 = sorted.slice(0, tier1Size);
-  const tier2 = sorted.slice(tier1Size, tier1Size + tier2Size);
-  const tier3 = sorted.slice(tier1Size + tier2Size);
+  const byOdds = (a, b) => {
+    const ao = Number(a.odds), bo = Number(b.odds);
+    const aValid = ao > 0, bValid = bo > 0;
+    if (aValid && bValid) return ao - bo;
+    if (aValid) return -1;
+    if (bValid) return 1;
+    return 0;
+  };
+  const tier1 = teams.filter((t) => Number(t.tier) === 1).slice().sort(byOdds);
+  const tier2 = teams.filter((t) => Number(t.tier) === 2).slice().sort(byOdds);
+  const tier3 = teams.filter((t) => Number(t.tier) === 3).slice().sort(byOdds);
   const tiersById = {};
   tier1.forEach((t) => (tiersById[t.id] = 1));
   tier2.forEach((t) => (tiersById[t.id] = 2));
@@ -6080,13 +6082,18 @@ function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading,
                 <option value="">Select a team...</option>
                 {options.map((t) => (
                   <option key={t.id} value={t.id}>
-                    {t.school} (+{t.odds})
+                    {t.school} ({formatOdds(t.odds)})
                   </option>
                 ))}
               </select>
+              {team && team.madePlayoff == null && (
+                <div className="cfb-mono text-xs mt-1.5" style={{ color: COLORS.goldBright }}>
+                  {team.school} · {formatOdds(team.odds)} to make it
+                </div>
+              )}
               {team && team.madePlayoff != null && (
                 <div className="cfb-mono text-xs mt-1.5" style={{ color: resultColor }}>
-                  {team.madePlayoff ? "made the playoff" : "did not make it"}
+                  {team.madePlayoff ? "made the playoff ✓" : "did not make it ✕"}
                 </div>
               )}
             </div>
@@ -6198,7 +6205,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
     if (selectedYear != null && !playoffCache[selectedYear]) {
       loadPlayoff(selectedYear, false);
     } else if (selectedYear != null && playoffCache[selectedYear] && !loadedExisting) {
-      setTeams(playoffCache[selectedYear].teams.map((t) => ({ ...t, odds: String(t.odds) })));
+      setTeams(playoffCache[selectedYear].teams.map((t) => ({ ...t, odds: String(t.odds), tier: Number(t.tier) || 1 })));
       setYearInput(String(selectedYear));
       setLoadedExisting(true);
     }
@@ -6256,7 +6263,12 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
           return;
         }
         const existingId = existingByName[normalizeTeam(t.school)];
-        cleaned.push({ id: existingId || newId(), school: String(t.school), odds: String(odds) });
+        // Preserve existing tier if this team was already on the board; else use JSON tier or default 1
+        const existingTeam = teams.find((et) => normalizeTeam(et.school) === normalizeTeam(t.school));
+        const tier = [1, 2, 3].includes(Number(t.tier))
+          ? Number(t.tier)
+          : (existingTeam ? Number(existingTeam.tier) || 1 : 1);
+        cleaned.push({ id: existingId || newId(), school: String(t.school), odds: String(odds), tier });
       });
       setTeams(cleaned);
       setImportText("");
@@ -6338,8 +6350,8 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
         {importOpen && (
           <div className="mt-3 space-y-2">
             <div className="text-xs" style={{ color: COLORS.chalkDim }}>
-              Ask me in chat for this year's "to make the playoff" odds, then paste the list here. Teams with
-              negative odds are automatically excluded. This replaces the team list below — review it before saving.
+              Paste this year's "to make the playoff" or championship odds. Teams with negative odds are
+              excluded. You'll assign each team to a tier below after loading. This replaces the team list.
             </div>
             <textarea
               value={importText}
@@ -6347,7 +6359,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
               rows={5}
               className="cfb-mono text-base sm:text-xs w-full p-2"
               style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
-              placeholder='[{"school":"Ohio State","odds":150}, {"school":"Boise State","odds":900}]'
+              placeholder='[{"school":"Ohio State","odds":550}, {"school":"Notre Dame","odds":650}]'
             />
             {importError && <Banner onDismiss={() => setImportError(null)}>{importError}</Banner>}
             <SecondaryButton onClick={handleParseImport} disabled={!importText.trim()}>
@@ -6368,8 +6380,19 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
             <div className="flex-1">
               <FieldInput value={t.school} onChange={(v) => updateTeam(idx, { school: v })} placeholder="School" />
             </div>
-            <div style={{ width: 90, flexShrink: 0 }}>
+            <div style={{ width: 80, flexShrink: 0 }}>
               <FieldInput type="number" value={t.odds} onChange={(v) => updateTeam(idx, { odds: v })} placeholder="+odds" />
+            </div>
+            <div style={{ width: 76, flexShrink: 0 }}>
+              <select
+                value={t.tier}
+                onChange={(e) => updateTeam(idx, { tier: Number(e.target.value) })}
+                style={{ width: "100%", background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}`, padding: "8px 6px", fontSize: "0.78rem", fontFamily: "var(--font-mono)" }}
+              >
+                <option value={1}>Tier 1</option>
+                <option value={2}>Tier 2</option>
+                <option value={3}>Tier 3</option>
+              </select>
             </div>
             <button onClick={() => removeRow(idx)} style={{ color: COLORS.muted }}>
               <Trash2 size={14} />
@@ -6385,11 +6408,14 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
       {teams.length > 0 && (
         <div className="px-3 py-3 text-xs space-y-1.5" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}`, color: COLORS.chalkDim }}>
           <div className="cfb-mono uppercase mb-1" style={{ color: COLORS.gold }}>
-            Tier preview (auto-computed from odds)
+            Tier assignment
           </div>
           <div><span style={{ color: COLORS.chalk }}>Tier 1</span> ({tier1.length}): {tier1.map((t) => t.school).join(", ") || "—"}</div>
           <div><span style={{ color: COLORS.chalk }}>Tier 2</span> ({tier2.length}): {tier2.map((t) => t.school).join(", ") || "—"}</div>
           <div><span style={{ color: COLORS.chalk }}>Tier 3</span> ({tier3.length}): {tier3.map((t) => t.school).join(", ") || "—"}</div>
+          <div className="mt-1.5" style={{ color: COLORS.muted }}>
+            Members pick 3 from Tier 1, 2 from Tier 2, 1 from Tier 3. Make sure each tier has enough teams.
+          </div>
         </div>
       )}
 
@@ -6399,7 +6425,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
         onClick={async () => {
           setBusy(true);
           const yr = Number(yearInput);
-          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), odds: Number(t.odds) }));
+          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), odds: Number(t.odds), tier: Number(t.tier) || 1 }));
           const ok = await savePlayoffBoard(yr, cleanTeams, currentBoard?.locked || false);
           setBusy(false);
           if (ok) setSelectedYear(yr);
