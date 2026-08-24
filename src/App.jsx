@@ -25,6 +25,7 @@ import {
   Target,
   Award,
   Flame,
+  Zap,
   DollarSign,
   Send,
   Copy,
@@ -3338,18 +3339,6 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
 
   const noScoresYet = completedCount === 0;
 
-  // Money formatter: +$X or −$X (no sign for 0)
-  function moneyCell(amount, projected) {
-    if (amount === 0) return <span style={{ color: COLORS.muted }}>—</span>;
-    const pos = amount > 0;
-    return (
-      <span style={{ color: pos ? COLORS.goldBright : COLORS.redBright }}>
-        {pos ? "+" : "−"}${Math.abs(amount).toFixed(2).replace(/\.00$/, "")}
-        {projected && <span style={{ color: COLORS.muted, fontSize: "0.65rem" }}>~</span>}
-      </span>
-    );
-  }
-
   return (
     <div className="space-y-3 cfb-fade-in">
       <div className="flex items-center justify-between">
@@ -3371,19 +3360,25 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
       )}
 
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
-        <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
+        <table className="cfb-mono text-sm" style={{ borderCollapse: "collapse", minWidth: "max-content" }}>
           <thead>
             <tr style={{ background: COLORS.fieldDeep }}>
-              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>#</th>
-              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim }}>name</th>
-              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>W</th>
-              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>L</th>
-              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>left</th>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim, position: "sticky", left: 0, background: COLORS.fieldDeep, zIndex: 2 }}>#</th>
+              <th className="text-left px-3 py-2" style={{ color: COLORS.chalkDim, position: "sticky", left: 32, background: COLORS.fieldDeep, zIndex: 2 }}>name</th>
+              <th className="text-right px-2 py-2" style={{ color: COLORS.chalkDim }}>W</th>
+              <th className="text-right px-2 py-2" style={{ color: COLORS.chalkDim }}>L</th>
+              <th className="text-right px-2 py-2" style={{ color: COLORS.chalkDim }}>left</th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim, borderLeft: `1px solid ${COLORS.line}` }}>
+                <span className="inline-flex items-center gap-1"><Trophy size={11} style={{ color: COLORS.gold }} /> weekly</span>
+              </th>
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>
                 <span className="inline-flex items-center gap-1"><Flame size={11} style={{ color: COLORS.gold }} /> lock</span>
               </th>
               <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>
-                <span className="inline-flex items-center gap-1"><DollarSign size={11} style={{ color: COLORS.gold }} /> $</span>
+                <span className="inline-flex items-center gap-1"><Zap size={11} style={{ color: COLORS.gold }} /> underdog</span>
+              </th>
+              <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim, borderLeft: `1px solid ${COLORS.lineStrong}` }}>
+                <span className="inline-flex items-center gap-1"><DollarSign size={11} style={{ color: COLORS.gold }} /> total</span>
               </th>
             </tr>
           </thead>
@@ -3396,38 +3391,54 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
                               : 0;
               const weeklyMoney = (winnerMoney[r.name] || 0) + (loserMoney[r.name] || 0);
               const total = lockMoney + weeklyMoney + r.udAmount;
-              // Projected if week not fully done or winner/loser not yet final
               const projected = !allDone && (weeklyMoney !== 0);
+
+              // Per-bucket cell renderer
+              const bucketCell = (amount, opts = {}) => {
+                if (amount === 0) return <span style={{ color: COLORS.muted }}>—</span>;
+                const pos = amount > 0;
+                return (
+                  <span style={{ color: pos ? COLORS.goldBright : COLORS.redBright }}>
+                    {pos ? "+" : "−"}${Math.abs(amount).toFixed(2).replace(/\.00$/, "")}
+                    {opts.projected && <span style={{ color: COLORS.muted, fontSize: "0.65rem" }}>~</span>}
+                  </span>
+                );
+              };
 
               return (
                 <tr key={r.name} style={{ borderTop: `1px solid ${COLORS.line}` }}>
-                  <td className="px-3 py-2" style={{ color: isLeading ? COLORS.gold : COLORS.muted }}>
+                  <td className="px-3 py-2" style={{ color: isLeading ? COLORS.gold : COLORS.muted, position: "sticky", left: 0, background: COLORS.fieldDark, zIndex: 1 }}>
                     {isLeading ? <Trophy size={14} /> : i + 1}
                   </td>
-                  <td className="px-3 py-2 font-semibold" style={{ color: r.submitted ? COLORS.chalk : COLORS.muted }}>
+                  <td className="px-3 py-2 font-semibold" style={{ color: r.submitted ? COLORS.chalk : COLORS.muted, position: "sticky", left: 32, background: COLORS.fieldDark, zIndex: 1, whiteSpace: "nowrap" }}>
                     {r.name}
                     {!r.submitted && <span className="cfb-mono font-normal text-xs ml-1.5" style={{ color: COLORS.muted }}>no picks</span>}
                     {perfectWeek && winnerMoney[r.name] && (
-                      <span className="cfb-mono font-bold text-xs ml-1.5" style={{ color: COLORS.gold }}>🎯 perfect!</span>
+                      <span className="cfb-mono font-bold text-xs ml-1.5" style={{ color: COLORS.gold }}>🎯</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-right font-bold" style={{ color: r.wins > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
+                  <td className="px-2 py-2 text-right font-bold" style={{ color: r.wins > 0 ? COLORS.goldBright : COLORS.chalkDim }}>
                     {r.wins}
                   </td>
-                  <td className="px-3 py-2 text-right" style={{ color: r.losses > 0 ? COLORS.redBright : COLORS.chalkDim }}>
+                  <td className="px-2 py-2 text-right" style={{ color: r.losses > 0 ? COLORS.redBright : COLORS.chalkDim }}>
                     {r.losses}
                   </td>
-                  <td className="px-3 py-2 text-right" style={{ color: COLORS.muted }}>
+                  <td className="px-2 py-2 text-right" style={{ color: COLORS.muted }}>
                     {r.pending}
                   </td>
-                  <td className="px-3 py-2 text-right">
-                    {r.lockResult === "won"  && <span style={{ color: COLORS.goldBright }}>+${settings.lockAmount}</span>}
-                    {r.lockResult === "lost" && <span style={{ color: COLORS.redBright }}>−${settings.lockAmount}</span>}
-                    {r.lockResult === "push" && <span style={{ color: COLORS.muted }}>push</span>}
-                    {r.lockResult === null   && <span style={{ color: COLORS.muted }}>—</span>}
+                  <td className="px-3 py-2 text-right" style={{ borderLeft: `1px solid ${COLORS.line}` }}>
+                    {bucketCell(weeklyMoney, { projected })}
                   </td>
-                  <td className="px-3 py-2 text-right font-semibold">
-                    {moneyCell(total, projected)}
+                  <td className="px-3 py-2 text-right">
+                    {r.lockResult === "push"
+                      ? <span style={{ color: COLORS.muted }}>push</span>
+                      : bucketCell(lockMoney)}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {bucketCell(r.udAmount)}
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold" style={{ borderLeft: `1px solid ${COLORS.lineStrong}` }}>
+                    {bucketCell(total, { projected })}
                   </td>
                 </tr>
               );
