@@ -239,19 +239,19 @@ function fmtMoney(n) {
 
 // Groups teams by their manually-assigned tier property.
 // Returns { tiersById: {teamId: 1|2|3}, tier1: [...], tier2: [...], tier3: [...] }
-// Within each tier, teams are ordered by best (lowest positive) odds.
+// Within each tier, teams are ordered strongest-favorite first.
+// For "to make the playoff" odds, more negative = bigger favorite (−800 > −200 > +150).
+function playoffImpliedProb(odds) {
+  const n = Number(odds);
+  if (!n || isNaN(n)) return 0;
+  return n < 0 ? Math.abs(n) / (Math.abs(n) + 100) : 100 / (n + 100);
+}
 function computePlayoffTiers(teams) {
-  const byOdds = (a, b) => {
-    const ao = Number(a.odds), bo = Number(b.odds);
-    const aValid = ao > 0, bValid = bo > 0;
-    if (aValid && bValid) return ao - bo;
-    if (aValid) return -1;
-    if (bValid) return 1;
-    return 0;
-  };
-  const tier1 = teams.filter((t) => Number(t.tier) === 1).slice().sort(byOdds);
-  const tier2 = teams.filter((t) => Number(t.tier) === 2).slice().sort(byOdds);
-  const tier3 = teams.filter((t) => Number(t.tier) === 3).slice().sort(byOdds);
+  // Higher implied probability (bigger favorite) sorts first
+  const byFavorite = (a, b) => playoffImpliedProb(b.odds) - playoffImpliedProb(a.odds);
+  const tier1 = teams.filter((t) => Number(t.tier) === 1).slice().sort(byFavorite);
+  const tier2 = teams.filter((t) => Number(t.tier) === 2).slice().sort(byFavorite);
+  const tier3 = teams.filter((t) => Number(t.tier) === 3).slice().sort(byFavorite);
   const tiersById = {};
   tier1.forEach((t) => (tiersById[t.id] = 1));
   tier2.forEach((t) => (tiersById[t.id] = 2));
@@ -6251,17 +6251,12 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
       teams.forEach((t) => {
         existingByName[normalizeTeam(t.school)] = t.id;
       });
-      let excludedCount = 0;
       const cleaned = [];
       data.forEach((t, i) => {
         if (!t.school || t.odds == null || isNaN(Number(t.odds))) {
           throw new Error(`Entry ${i + 1} is missing a school name or numeric odds.`);
         }
         const odds = Number(t.odds);
-        if (odds <= 0) {
-          excludedCount++;
-          return;
-        }
         const existingId = existingByName[normalizeTeam(t.school)];
         // Preserve existing tier if this team was already on the board; else use JSON tier or default 1
         const existingTeam = teams.find((et) => normalizeTeam(et.school) === normalizeTeam(t.school));
@@ -6273,11 +6268,6 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
       setTeams(cleaned);
       setImportText("");
       setImportOpen(false);
-      if (excludedCount > 0) {
-        setImportNotice(
-          `Excluded ${excludedCount} team${excludedCount === 1 ? "" : "s"} with negative odds (favorites aren't pick-able).`
-        );
-      }
     } catch (e) {
       setImportError(e.message);
     }
@@ -6288,7 +6278,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
     yearInput.trim() &&
     !isNaN(Number(yearInput)) &&
     teams.length >= 7 &&
-    teams.every((t) => t.school.trim() && t.odds !== "" && !isNaN(Number(t.odds)) && Number(t.odds) > 0);
+    teams.every((t) => t.school.trim() && t.odds !== "" && !isNaN(Number(t.odds)));
 
   const { tier1, tier2, tier3 } = computePlayoffTiers(
     teams.map((t) => ({ ...t, odds: Number(t.odds) })).filter((t) => !isNaN(t.odds))
