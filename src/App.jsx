@@ -1218,6 +1218,23 @@ export default function App() {
 
   async function saveWinTotalsBoard(year, teams, locked) {
     const existing = winTotalsCache[year];
+
+    // Auto-fetch first-game kickoff dates from ESPN (best-effort)
+    const existingDates = {};
+    if (existing) {
+      existing.teams.forEach((t) => {
+        if (t.firstGameISO) existingDates[t.school.toLowerCase()] = t.firstGameISO;
+      });
+    }
+    // Only fetch from ESPN if any team is missing a date
+    const anyMissing = teams.some((t) => !existingDates[t.school.toLowerCase()]);
+    let espnDates = {};
+    if (anyMissing) {
+      try {
+        espnDates = await fetchFirstGameDates(year);
+      } catch { /* non-fatal */ }
+    }
+
     let payload;
     if (existing) {
       const finalMap = {};
@@ -1225,10 +1242,24 @@ export default function App() {
       payload = {
         year,
         locked,
-        teams: teams.map((t) => ({ ...t, finalWins: finalMap[t.id] ?? null })),
+        teams: teams.map((t) => ({
+          ...t,
+          finalWins: finalMap[t.id] ?? null,
+          firstGameISO: existingDates[t.school.toLowerCase()]
+            || espnDates[t.school.toLowerCase()]
+            || null,
+        })),
       };
     } else {
-      payload = { year, locked, teams: teams.map((t) => ({ ...t, finalWins: null })) };
+      payload = {
+        year,
+        locked,
+        teams: teams.map((t) => ({
+          ...t,
+          finalWins: null,
+          firstGameISO: espnDates[t.school.toLowerCase()] || null,
+        })),
+      };
     }
     const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
     if (!r) {
@@ -4062,6 +4093,38 @@ async function fetchEspnWeekDates(year, week) {
   }
 }
 
+// Fetch each team's first regular-season game kickoff date from ESPN.
+// Returns a map: { "alabama": "2026-08-30T00:00:00Z", ... }
+async function fetchFirstGameDates(year) {
+  const teamDates = {};
+  // Fetch weeks 0–2 to cover all early-season kickoffs
+  for (const week of [0, 1, 2]) {
+    try {
+      const res = await fetch(
+        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
+        `?seasontype=2&week=${week}&year=${year}&limit=200`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const event of data.events || []) {
+        const comp = event.competitions?.[0];
+        if (!comp?.date) continue;
+        const kickoffISO = comp.date; // full ISO string from ESPN
+        for (const competitor of comp.competitors || []) {
+          const name = competitor.team?.displayName;
+          if (!name) continue;
+          const key = name.toLowerCase();
+          // Keep the earliest game date for each team
+          if (!teamDates[key] || new Date(kickoffISO) < new Date(teamDates[key])) {
+            teamDates[key] = kickoffISO;
+          }
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+  return teamDates;
+}
+
 function getDatesInRange(fromDateStr, toDateStr) {  const dates = [];
   const start = new Date(fromDateStr + "T00:00:00");
   const end = new Date(toDateStr + "T23:59:59");
@@ -5267,17 +5330,28 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
         {WT_SLOTS.map((slot) => {
           const sel = selections[slot.key] || {};
           const team = sel.teamId ? teamsById[sel.teamId] : null;
+          // Per-team lock: if the selected team's first game has kicked off, this slot is frozen
+          const teamKickedOff = team?.firstGameISO && Date.now() >= new Date(team.firstGameISO).getTime();
+          const disabled = board.locked || teamKickedOff;
+          // Filter options: exclude teams whose first game has already kicked off (can't pick a team mid-season)
           const options = board.teams.filter(
             (t) =>
               (!slot.conference || normalizeConf(t.conference) === slot.conference) &&
-              (!usedTeamIds.has(t.id) || t.id === sel.teamId)
+              (!usedTeamIds.has(t.id) || t.id === sel.teamId) &&
+              (!t.firstGameISO || Date.now() < new Date(t.firstGameISO).getTime() || t.id === sel.teamId)
           );
-          const disabled = board.locked;
           return (
             <div key={slot.key} className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
-              <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.gold }}>
-                {slot.label}
-                {!slot.conference && " (any Power 4 team)"}
+              <div className="cfb-mono text-xs uppercase mb-2 flex items-center justify-between">
+                <span style={{ color: COLORS.gold }}>
+                  {slot.label}
+                  {!slot.conference && " (any Power 4 team)"}
+                </span>
+                {teamKickedOff && (
+                  <span className="flex items-center gap-1" style={{ color: COLORS.muted, textTransform: "none" }}>
+                    <Lock size={10} /> locked — season started
+                  </span>
+                )}
               </div>
               <select
                 disabled={disabled}
@@ -5341,38 +5415,47 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
         })}
       </div>
 
-      {!board.locked && (
-        <>
-          <PrimaryButton
-            full
-            disabled={!canSubmit || saving}
-            onClick={async () => {
-              setSaving(true);
-              const picks = WT_SLOTS.map((s) => ({
-                slotKey: s.key,
-                teamId: selections[s.key].teamId,
-                side: selections[s.key].side,
-              }));
-              await saveWinTotalsPicks(selectedYear, picks);
-              setSaving(false);
-            }}
-          >
-            {saving ? "Saving..." : "Save my picks"}
-          </PrimaryButton>
-          {!canSubmit && (
-            <div className="text-xs" style={{ color: COLORS.muted }}>
-              Fill all 6 picks (one per Power 4 conference, plus 2 wildcards) with no repeated teams to save.
-            </div>
-          )}
-        </>
-      )}
+      {!board.locked && (() => {
+        // Check if any unlocked slot has changes that can be saved
+        const anyUnlockedSlotFilled = WT_SLOTS.some((s) => {
+          const sel = selections[s.key];
+          if (!sel?.teamId || !sel?.side) return false;
+          const team = teamsById[sel.teamId];
+          const kicked = team?.firstGameISO && Date.now() >= new Date(team.firstGameISO).getTime();
+          return !kicked; // only count unlocked slots
+        });
+        return (
+          <>
+            <PrimaryButton
+              full
+              disabled={!canSubmit || saving}
+              onClick={async () => {
+                setSaving(true);
+                const picks = WT_SLOTS.map((s) => ({
+                  slotKey: s.key,
+                  teamId: selections[s.key].teamId,
+                  side: selections[s.key].side,
+                }));
+                await saveWinTotalsPicks(selectedYear, picks);
+                setSaving(false);
+              }}
+            >
+              {saving ? "Saving..." : "Save my picks"}
+            </PrimaryButton>
+            {!canSubmit && (
+              <div className="text-xs" style={{ color: COLORS.muted }}>
+                Fill all 6 picks (one per Power 4 conference, plus 2 wildcards) with no repeated teams to save.
+              </div>
+            )}
+          </>
+        );
+      })()}
 
-      {board.locked && (
-        <WinTotalsGrid leagueMeta={leagueMeta} board={board} picksCache={picksForYear} slugToName={slugToName} />
-      )}
+      {/* Everyone's picks — always visible */}
+      <WinTotalsGrid leagueMeta={leagueMeta} board={board} picksCache={picksForYear} slugToName={slugToName} />
 
-      {board.locked && (
-        <div className="mt-2">
+      {/* Leaderboard — always visible */}
+      <div className="mt-2">
           <div className="cfb-display text-lg uppercase mb-2">Win Totals Leaderboard</div>
           {leaderboardRows.length === 0 || leaderboardRows.every((r) => r.graded === 0) ? (
             <div className="text-sm" style={{ color: COLORS.muted }}>
@@ -5405,7 +5488,6 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
             </div>
           )}
         </div>
-      )}
     </div>
   );
 }
