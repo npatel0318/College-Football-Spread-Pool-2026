@@ -6080,15 +6080,20 @@ function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading,
                 }}
               >
                 <option value="">Select a team...</option>
-                {options.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.school} ({formatOdds(t.odds)})
-                  </option>
-                ))}
+                {options.map((t) => {
+                  const hasOdds = t.odds != null && t.odds !== "";
+                  return (
+                    <option key={t.id} value={t.id}>
+                      {t.school}{hasOdds ? ` (${formatOdds(t.odds)})` : ""}
+                    </option>
+                  );
+                })}
               </select>
               {team && team.madePlayoff == null && (
                 <div className="cfb-mono text-xs mt-1.5" style={{ color: COLORS.goldBright }}>
-                  {team.school} · {formatOdds(team.odds)} to make it
+                  {team.odds != null && team.odds !== ""
+                    ? `${team.school} · ${formatOdds(team.odds)} to make it`
+                    : `${team.school} · longshot`}
                 </div>
               )}
               {team && team.madePlayoff != null && (
@@ -6205,7 +6210,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
     if (selectedYear != null && !playoffCache[selectedYear]) {
       loadPlayoff(selectedYear, false);
     } else if (selectedYear != null && playoffCache[selectedYear] && !loadedExisting) {
-      setTeams(playoffCache[selectedYear].teams.map((t) => ({ ...t, odds: String(t.odds), tier: Number(t.tier) || 1 })));
+      setTeams(playoffCache[selectedYear].teams.map((t) => ({ ...t, odds: t.odds == null ? "" : String(t.odds), tier: Number(t.tier) || 3 })));
       setYearInput(String(selectedYear));
       setLoadedExisting(true);
     }
@@ -6253,17 +6258,24 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
       });
       const cleaned = [];
       data.forEach((t, i) => {
-        if (!t.school || t.odds == null || isNaN(Number(t.odds))) {
-          throw new Error(`Entry ${i + 1} is missing a school name or numeric odds.`);
+        if (!t.school) {
+          throw new Error(`Entry ${i + 1} is missing a school name.`);
         }
-        const odds = Number(t.odds);
+        // Odds are optional — many FBS teams have no published playoff odds
+        const hasOdds = t.odds != null && t.odds !== "" && !isNaN(Number(t.odds));
+        if (t.odds != null && t.odds !== "" && isNaN(Number(t.odds))) {
+          throw new Error(`Entry ${i + 1} (${t.school}) has non-numeric odds.`);
+        }
+        const oddsStr = hasOdds ? String(Number(t.odds)) : "";
         const existingId = existingByName[normalizeTeam(t.school)];
-        // Preserve existing tier if this team was already on the board; else use JSON tier or default 1
+        // Preserve existing tier if this team was already on the board.
+        // New teams default to tier 3 (the last tier) — commissioner promotes
+        // contenders up to tiers 1 and 2; everyone left stays a tier-3 longshot.
         const existingTeam = teams.find((et) => normalizeTeam(et.school) === normalizeTeam(t.school));
         const tier = [1, 2, 3].includes(Number(t.tier))
           ? Number(t.tier)
-          : (existingTeam ? Number(existingTeam.tier) || 1 : 1);
-        cleaned.push({ id: existingId || newId(), school: String(t.school), odds: String(odds), tier });
+          : (existingTeam ? Number(existingTeam.tier) || 3 : 3);
+        cleaned.push({ id: existingId || newId(), school: String(t.school), odds: oddsStr, tier });
       });
       setTeams(cleaned);
       setImportText("");
@@ -6278,10 +6290,10 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
     yearInput.trim() &&
     !isNaN(Number(yearInput)) &&
     teams.length >= 7 &&
-    teams.every((t) => t.school.trim() && t.odds !== "" && !isNaN(Number(t.odds)));
+    teams.every((t) => t.school.trim() && (t.odds === "" || !isNaN(Number(t.odds))));
 
   const { tier1, tier2, tier3 } = computePlayoffTiers(
-    teams.map((t) => ({ ...t, odds: Number(t.odds) })).filter((t) => !isNaN(t.odds))
+    teams.map((t) => ({ ...t, odds: t.odds === "" ? null : Number(t.odds) }))
   );
 
   return (
@@ -6340,8 +6352,9 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
         {importOpen && (
           <div className="mt-3 space-y-2">
             <div className="text-xs" style={{ color: COLORS.chalkDim }}>
-              Paste this year's "to make the playoff" or championship odds. Teams with negative odds are
-              excluded. You'll assign each team to a tier below after loading. This replaces the team list.
+              Paste the full team list. Odds are optional — include "to make the playoff" odds for contenders;
+              longshots can be left without odds. Every team imports into Tier 3 by default. Assign tiers below —
+              promote contenders to Tiers 1 and 2, and everyone left stays a Tier 3 longshot.
             </div>
             <textarea
               value={importText}
@@ -6349,7 +6362,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
               rows={5}
               className="cfb-mono text-base sm:text-xs w-full p-2"
               style={{ background: COLORS.fieldDeep, color: COLORS.chalk, border: `1px solid ${COLORS.lineStrong}` }}
-              placeholder='[{"school":"Ohio State","odds":550}, {"school":"Notre Dame","odds":650}]'
+              placeholder='[{"school":"Notre Dame","odds":-800}, {"school":"Kent State"}]'
             />
             {importError && <Banner onDismiss={() => setImportError(null)}>{importError}</Banner>}
             <SecondaryButton onClick={handleParseImport} disabled={!importText.trim()}>
@@ -6415,7 +6428,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
         onClick={async () => {
           setBusy(true);
           const yr = Number(yearInput);
-          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), odds: Number(t.odds), tier: Number(t.tier) || 1 }));
+          const cleanTeams = teams.map((t) => ({ id: t.id, school: t.school.trim(), odds: t.odds === "" ? null : Number(t.odds), tier: Number(t.tier) || 3 }));
           const ok = await savePlayoffBoard(yr, cleanTeams, currentBoard?.locked || false);
           setBusy(false);
           if (ok) setSelectedYear(yr);
