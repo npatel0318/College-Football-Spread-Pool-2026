@@ -434,13 +434,14 @@ function SecondaryButton({ children, onClick, disabled, full }) {
   );
 }
 
-function FieldInput({ value, onChange, placeholder, type = "text", style, disabled }) {
+function FieldInput({ value, onChange, placeholder, type = "text", style, disabled, onBlur }) {
   return (
     <input
       type={type}
       value={value}
       disabled={disabled}
       onChange={(e) => onChange(e.target.value)}
+      onBlur={onBlur}
       placeholder={placeholder}
       className="cfb-mono text-base sm:text-sm px-2 py-2.5 sm:py-2 w-full"
       style={{
@@ -6236,6 +6237,17 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
   function removeRow(idx) {
     setTeams((prev) => prev.filter((_, i) => i !== idx));
   }
+  // Re-order teams by odds: biggest favorite first, longshots next, blank odds last.
+  // Called when an odds field loses focus so rows don't jump around while typing.
+  function sortByOdds() {
+    setTeams((prev) => {
+      const withOdds = prev.filter((t) => t.odds !== "" && !isNaN(Number(t.odds)));
+      const noOdds = prev.filter((t) => t.odds === "" || isNaN(Number(t.odds)));
+      withOdds.sort((a, b) => playoffImpliedProb(Number(b.odds)) - playoffImpliedProb(Number(a.odds)));
+      // Keep no-odds teams in their existing relative order, appended at the end
+      return [...withOdds, ...noOdds];
+    });
+  }
 
   function handleParseImport() {
     setImportError(null);
@@ -6377,6 +6389,21 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
         )}
       </div>
 
+      {teams.length > 0 && (
+        <div className="flex items-center justify-between">
+          <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.chalkDim, letterSpacing: "0.06em" }}>
+            {teams.length} team{teams.length === 1 ? "" : "s"}
+          </div>
+          <button
+            onClick={sortByOdds}
+            className="cfb-mono cfb-btn text-xs px-2.5 py-1.5 flex items-center gap-1.5"
+            style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}
+          >
+            <TrendingUp size={12} /> Sort by odds
+          </button>
+        </div>
+      )}
+
       <div className="space-y-2">
         {teams.map((t, idx) => (
           <div key={t.id} className="flex items-center gap-2 px-3 py-2" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
@@ -6384,7 +6411,7 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
               <FieldInput value={t.school} onChange={(v) => updateTeam(idx, { school: v })} placeholder="School" />
             </div>
             <div style={{ width: 80, flexShrink: 0 }}>
-              <FieldInput type="number" value={t.odds} onChange={(v) => updateTeam(idx, { odds: v })} placeholder="+odds" />
+              <FieldInput type="number" value={t.odds} onChange={(v) => updateTeam(idx, { odds: v })} onBlur={sortByOdds} placeholder="+odds" />
             </div>
             <div style={{ width: 76, flexShrink: 0 }}>
               <select
