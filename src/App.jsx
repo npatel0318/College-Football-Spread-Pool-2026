@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { storage } from "./storage";
 import { db } from "./firebase";
-import { collection, getDocs, writeBatch } from "firebase/firestore";
+import { collection, getDocs, writeBatch, onSnapshot, doc, query, where } from "firebase/firestore";
 import {
   Lock,
   Unlock,
@@ -747,11 +747,77 @@ export default function App() {
     }
   }, []);
 
+  // Real-time listeners for the picks tab — week games + all member picks.
+  // Fires within ~300ms whenever anyone saves a pick or the commissioner
+  // updates scores. Cleans up listeners on tab/week change.
+  const picksTabListenerRef = useRef(null);
+
   useEffect(() => {
-    if (phase === "app" && selectedWeek != null && activeTab === "picks") {
-      loadWeek(selectedWeek, true);
+    // Tear down any existing listener when conditions change
+    if (picksTabListenerRef.current) {
+      picksTabListenerRef.current();
+      picksTabListenerRef.current = null;
     }
-  }, [phase, selectedWeek, activeTab, loadWeek]);
+
+    if (phase !== "app" || selectedWeek == null || activeTab !== "picks") return;
+
+    setWeekLoading(true);
+
+    // Track when each listener fires for the first time so we can clear loading
+    let weekReady = false, picksReady = false;
+    function maybeReady() {
+      if (weekReady && picksReady) setWeekLoading(false);
+    }
+
+    // 1. Listen to the week games document (scores, lock status, etc.)
+    const weekUnsub = onSnapshot(
+      doc(db, "weeks", String(selectedWeek)),
+      (snap) => {
+        if (snap.exists()) {
+          try {
+            const weekObj = JSON.parse(snap.data().value);
+            setWeekCache((prev) => ({ ...prev, [selectedWeek]: weekObj }));
+          } catch {}
+        }
+        weekReady = true;
+        maybeReady();
+      },
+      (err) => {
+        console.error("Week listener error:", err);
+        weekReady = true;
+        maybeReady();
+      }
+    );
+
+    // 2. Listen to all picks for this week (every member's picks doc)
+    const picksUnsub = onSnapshot(
+      query(collection(db, "picks"), where("week", "==", selectedWeek)),
+      (snap) => {
+        const picksObj = {};
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          if (!data.slug || !data.value) return;
+          try { picksObj[data.slug] = JSON.parse(data.value); } catch {}
+        });
+        setPicksCache((prev) => ({ ...prev, [selectedWeek]: picksObj }));
+        picksReady = true;
+        maybeReady();
+      },
+      (err) => {
+        console.error("Picks listener error:", err);
+        picksReady = true;
+        maybeReady();
+      }
+    );
+
+    picksTabListenerRef.current = () => { weekUnsub(); picksUnsub(); };
+    return () => {
+      if (picksTabListenerRef.current) {
+        picksTabListenerRef.current();
+        picksTabListenerRef.current = null;
+      }
+    };
+  }, [phase, selectedWeek, activeTab]);
 
   async function savePick(weekNum, gameId, side) {
     setSavingGameId(gameId);
