@@ -5238,7 +5238,25 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
   const mySlug = slugify(myName);
   const [selections, setSelections] = useState({}); // slotKey -> {teamId, side}
   const [saving, setSaving] = useState(false);
+  const [savingSlot, setSavingSlot] = useState(null);
   const [loadedExisting, setLoadedExisting] = useState(false);
+
+  function updateSlot(slotKey, patch) {
+    setSelections((prev) => ({ ...prev, [slotKey]: { ...prev[slotKey], ...patch } }));
+  }
+
+  // Auto-save as soon as team + side are both chosen — no button needed
+  async function autoSaveSlot(slotKey, newSide) {
+    const currentSel = selections[slotKey];
+    if (!currentSel?.teamId) return; // team not yet chosen
+    const merged = { ...selections, [slotKey]: { ...currentSel, side: newSide } };
+    const picks = WT_SLOTS
+      .filter((s) => merged[s.key]?.teamId && merged[s.key]?.side)
+      .map((s) => ({ slotKey: s.key, teamId: merged[s.key].teamId, side: merged[s.key].side }));
+    setSavingSlot(slotKey);
+    await saveWinTotalsPicks(selectedYear, picks);
+    setSavingSlot(null);
+  }
 
   useEffect(() => {
     setLoadedExisting(false);
@@ -5382,11 +5400,15 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
                   {slot.label}
                   {!slot.conference && " (any Power 4 team)"}
                 </span>
-                {teamKickedOff && (
+                {savingSlot === slot.key ? (
+                  <span className="flex items-center gap-1" style={{ color: COLORS.muted, textTransform: "none" }}>
+                    <RefreshCw size={10} className="animate-spin" /> saving…
+                  </span>
+                ) : teamKickedOff ? (
                   <span className="flex items-center gap-1" style={{ color: COLORS.muted, textTransform: "none" }}>
                     <Lock size={10} /> locked — season started
                   </span>
-                )}
+                ) : null}
               </div>
               <select
                 disabled={disabled}
@@ -5429,8 +5451,11 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
                     return (
                       <button
                         key={side}
-                        disabled={disabled}
-                        onClick={() => updateSlot(slot.key, { side })}
+                        disabled={disabled || savingSlot === slot.key}
+                        onClick={() => {
+                          updateSlot(slot.key, { side });
+                          autoSaveSlot(slot.key, side);
+                        }}
                         className="cfb-btn px-2.5 py-2 text-sm font-semibold capitalize"
                         style={{ background: bg, border: `1px solid ${borderColor}`, color: textColor, cursor: disabled ? "default" : "pointer" }}
                       >
@@ -5449,49 +5474,6 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
           );
         })}
       </div>
-
-      {!board.locked && (() => {
-        // Check if any unlocked slot has changes that can be saved
-        const anyUnlockedSlotFilled = WT_SLOTS.some((s) => {
-          const sel = selections[s.key];
-          if (!sel?.teamId || !sel?.side) return false;
-          const team = teamsById[sel.teamId];
-          const kicked = team?.firstGameISO && Date.now() >= new Date(team.firstGameISO).getTime();
-          return !kicked; // only count unlocked slots
-        });
-        return (
-          <>
-            <PrimaryButton
-              full
-              disabled={!canSubmit || saving}
-              onClick={async () => {
-                setSaving(true);
-                const picks = WT_SLOTS
-                  .filter((s) => selections[s.key]?.teamId && selections[s.key]?.side)
-                  .map((s) => ({
-                    slotKey: s.key,
-                    teamId: selections[s.key].teamId,
-                    side: selections[s.key].side,
-                  }));
-                await saveWinTotalsPicks(selectedYear, picks);
-                setSaving(false);
-              }}
-            >
-              {saving ? "Saving..." : `Save ${filledSlots.length} pick${filledSlots.length === 1 ? "" : "s"}`}
-            </PrimaryButton>
-            {!canSubmit && filledSlots.length === 0 && (
-              <div className="text-xs" style={{ color: COLORS.muted }}>
-                Select a team and pick over or under to save.
-              </div>
-            )}
-            {!canSubmit && filledSlots.length > 0 && !noDuplicates && (
-              <div className="text-xs" style={{ color: COLORS.muted }}>
-                You've selected the same team more than once.
-              </div>
-            )}
-          </>
-        );
-      })()}
 
       {/* Everyone's picks — always visible */}
       <WinTotalsGrid leagueMeta={leagueMeta} board={board} picksCache={picksForYear} slugToName={slugToName} />
