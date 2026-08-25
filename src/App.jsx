@@ -939,6 +939,7 @@ export default function App() {
       ...prev,
       [weekNum]: { ...(prev[weekNum] || {}), [mySlug]: payload },
     }));
+    flashSaved();
   }
 
   async function saveUnderdogPick(weekNum, underdogPick) {
