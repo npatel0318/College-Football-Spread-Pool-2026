@@ -1326,6 +1326,7 @@ export default function App() {
       ...prev,
       [year]: { ...(prev[year] || {}), [mySlug]: payload },
     }));
+    flashSaved();
     return true;
   }
 
@@ -1442,7 +1443,26 @@ export default function App() {
     return { updated, checked: board.teams.length };
   }
 
-  /* ---------- playoff picks ---------- */
+  // Preview which board teams match an ESPN team record (by name) and which don't.
+  // Lets the commissioner catch name mismatches before they silently skip grading.
+  // Returns { matched: [names], unmatched: [names] } or null on fetch failure.
+  async function checkWinTotalsMatches(year) {
+    const board = winTotalsCache[year];
+    if (!board) return null;
+    let records;
+    try {
+      records = await fetchTeamRecords(year);
+    } catch {
+      return null;
+    }
+    const matched = [];
+    const unmatched = [];
+    board.teams.forEach((team) => {
+      if (records[team.school.toLowerCase()]) matched.push(team.school);
+      else unmatched.push(team.school);
+    });
+    return { matched, unmatched, total: board.teams.length };
+  }
 
   const loadPlayoff = useCallback(async (year, withPicks) => {
     if (year == null) return;
@@ -1524,6 +1544,7 @@ export default function App() {
       ...prev,
       [year]: { ...(prev[year] || {}), [mySlug]: payload },
     }));
+    flashSaved();
     return true;
   }
 
@@ -4051,6 +4072,7 @@ function CommishTab({
           loadWinTotals={loadWinTotals}
           saveWinTotalsResults={saveWinTotalsResults}
           autoGradeWinTotals={autoGradeWinTotals}
+          checkWinTotalsMatches={checkWinTotalsMatches}
         />
       )}
       {mode === "pBoard" && (
@@ -5720,6 +5742,29 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
         </div>
       )}
 
+      {!board.locked && (() => {
+        const myFilled = WT_SLOTS.filter((s) => selections[s.key]?.teamId && selections[s.key]?.side).length;
+        const complete = myFilled === WT_SLOTS.length;
+        return (
+          <div
+            className="px-3 py-2.5 flex items-center gap-2"
+            style={{
+              border: `1px solid ${complete ? COLORS.gold : COLORS.lineStrong}`,
+              background: complete ? "rgba(217,164,65,0.08)" : COLORS.fieldDeep,
+            }}
+          >
+            {complete
+              ? <CheckCircle2 size={15} style={{ color: COLORS.goldBright, flexShrink: 0 }} />
+              : <AlertCircle size={15} style={{ color: COLORS.chalkDim, flexShrink: 0 }} />}
+            <span className="cfb-mono text-xs" style={{ color: complete ? COLORS.goldBright : COLORS.chalk }}>
+              {complete
+                ? "All 6 win-total picks made — you're set."
+                : `${myFilled} of ${WT_SLOTS.length} win-total picks made — ${WT_SLOTS.length - myFilled} left`}
+            </span>
+          </div>
+        );
+      })()}
+
       <div className="space-y-3">
         {WT_SLOTS.map((slot) => {
           const sel = selections[slot.key] || {};
@@ -6160,7 +6205,7 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
   );
 }
 
-function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsResults, autoGradeWinTotals }) {
+function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsResults, autoGradeWinTotals, checkWinTotalsMatches }) {
   const years = leagueMeta.winTotalsYears || [];
   const [selectedYear, setSelectedYear] = useState(years.length ? Math.max(...years) : null);
   const [finals, setFinals] = useState({});
@@ -6168,6 +6213,8 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
   const [busy, setBusy] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [fetchNote, setFetchNote] = useState(null);
+  const [checkingMatches, setCheckingMatches] = useState(false);
+  const [matchResult, setMatchResult] = useState(null);
   const board = selectedYear != null ? winTotalsCache[selectedYear] : null;
 
   useEffect(() => {
@@ -6229,6 +6276,52 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
               </span>
             </SecondaryButton>
             {fetchNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{fetchNote}</span>}
+          </div>
+
+          {/* Team name match check — catch mismatches before they silently skip grading */}
+          <div>
+            <button
+              onClick={async () => {
+                setCheckingMatches(true);
+                setMatchResult(null);
+                const res = await checkWinTotalsMatches(selectedYear);
+                setCheckingMatches(false);
+                setMatchResult(res || { error: true });
+              }}
+              disabled={checkingMatches}
+              className="cfb-mono text-xs flex items-center gap-1.5"
+              style={{ color: COLORS.chalkDim }}
+            >
+              <Search size={11} />
+              {checkingMatches ? "Checking team names…" : "Check team names against ESPN"}
+            </button>
+
+            {matchResult && matchResult.error && (
+              <div className="text-xs mt-2" style={{ color: COLORS.redBright }}>
+                Couldn't reach ESPN — try again in a moment.
+              </div>
+            )}
+            {matchResult && !matchResult.error && (
+              <div className="mt-2 px-3 py-2.5 space-y-1.5" style={{ border: `1px solid ${matchResult.unmatched.length ? COLORS.red : COLORS.line}`, background: COLORS.fieldDeep }}>
+                <div className="cfb-mono text-xs" style={{ color: matchResult.unmatched.length ? COLORS.redBright : COLORS.goldBright }}>
+                  {matchResult.matched.length} of {matchResult.total} teams matched ESPN
+                </div>
+                {matchResult.unmatched.length > 0 ? (
+                  <>
+                    <div className="text-xs" style={{ color: COLORS.chalk }}>
+                      These {matchResult.unmatched.length} won't auto-grade — fix the spelling in the board editor to match ESPN, or use manual override:
+                    </div>
+                    <div className="cfb-mono text-xs" style={{ color: COLORS.redBright }}>
+                      {matchResult.unmatched.join(", ")}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-xs" style={{ color: COLORS.muted }}>
+                    Every team matched — auto-grading will cover the whole board.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -6424,6 +6517,29 @@ function PlayoffTab({ leagueMeta, selectedYear, setSelectedYear, board, loading,
           toward your total on the Standings tab. {submittedCount} of {leagueMeta.members.length} have submitted picks.
         </div>
       )}
+
+      {!board.locked && (() => {
+        const myFilled = PLAYOFF_SLOTS.filter((s) => selections[s.key]).length;
+        const complete = myFilled === PLAYOFF_SLOTS.length;
+        return (
+          <div
+            className="px-3 py-2.5 flex items-center gap-2"
+            style={{
+              border: `1px solid ${complete ? COLORS.gold : COLORS.lineStrong}`,
+              background: complete ? "rgba(217,164,65,0.08)" : COLORS.fieldDeep,
+            }}
+          >
+            {complete
+              ? <CheckCircle2 size={15} style={{ color: COLORS.goldBright, flexShrink: 0 }} />
+              : <AlertCircle size={15} style={{ color: COLORS.chalkDim, flexShrink: 0 }} />}
+            <span className="cfb-mono text-xs" style={{ color: complete ? COLORS.goldBright : COLORS.chalk }}>
+              {complete
+                ? "All 6 playoff picks made — you're set."
+                : `${myFilled} of ${PLAYOFF_SLOTS.length} playoff picks made — ${PLAYOFF_SLOTS.length - myFilled} left`}
+            </span>
+          </div>
+        );
+      })()}
 
       <div className="space-y-3">
         {PLAYOFF_SLOTS.map((slot) => {
