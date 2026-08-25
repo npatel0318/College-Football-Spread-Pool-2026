@@ -26,6 +26,7 @@ import {
   Award,
   Flame,
   Zap,
+  LayoutDashboard,
   DollarSign,
   Send,
   Copy,
@@ -585,6 +586,13 @@ export default function App() {
   const [leagueMeta, setLeagueMeta] = useState(boot?.meta ?? null);
   const [myName, setMyName] = useState(boot?.name ?? null);
   const [error, setError] = useState(null);
+  const [savedToast, setSavedToast] = useState(false);
+  const savedToastTimerRef = useRef(null);
+  function flashSaved() {
+    setSavedToast(true);
+    if (savedToastTimerRef.current) clearTimeout(savedToastTimerRef.current);
+    savedToastTimerRef.current = setTimeout(() => setSavedToast(false), 1600);
+  }
 
   const [activeTab, setActiveTab] = useState("picks");
   const [selectedWeek, setSelectedWeek] = useState(
@@ -909,6 +917,7 @@ export default function App() {
         ...prev,
         [weekNum]: { ...(prev[weekNum] || {}), [mySlug]: payload },
       }));
+      flashSaved();
     }
     setSavingGameId(null);
   }
@@ -2172,6 +2181,34 @@ export default function App() {
         style={{ paddingBottom: "calc(72px + env(safe-area-inset-bottom))" }}
       >
         {error && <div className="mb-3"><Banner onDismiss={() => setError(null)}>{error}</Banner></div>}
+
+        {/* Saved confirmation toast */}
+        {savedToast && (
+          <div
+            style={{
+              position: "fixed",
+              left: "50%",
+              transform: "translateX(-50%)",
+              bottom: "calc(80px + env(safe-area-inset-bottom))",
+              zIndex: 9998,
+              background: COLORS.gold,
+              color: COLORS.ink,
+              fontFamily: "var(--font-mono)",
+              fontSize: "0.8rem",
+              fontWeight: 700,
+              padding: "8px 16px",
+              borderRadius: 8,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              pointerEvents: "none",
+            }}
+            className="cfb-fade-in"
+          >
+            <CheckCircle2 size={14} /> saved
+          </div>
+        )}
 
         {activeTab === "picks" && (
           <PicksTab
@@ -3761,7 +3798,7 @@ function CommishTab({
   regenerateMemberToken,
   saveWeeklyAdjustments,
 }) {
-  const [mode, setMode] = useState("games");
+  const [mode, setMode] = useState("overview");
   const [editingWeek, setEditingWeek] = useState(null);
   const [isDesktop, setIsDesktop] = useState(
     typeof window !== "undefined" && window.innerWidth >= 768
@@ -3771,6 +3808,16 @@ function CommishTab({
     window.addEventListener("resize", handler);
     return () => window.removeEventListener("resize", handler);
   }, []);
+
+  // When the dashboard is shown, make sure every week is loaded so the
+  // "needs attention" alerts are computed against complete data.
+  useEffect(() => {
+    if (mode !== "overview" || !commishUnlocked) return;
+    (leagueMeta.weeks || []).forEach((w) => {
+      if (!weekCache[w]) loadWeek(w, false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, commishUnlocked]);
 
   if (!commishUnlocked) {
     return (
@@ -3788,6 +3835,12 @@ function CommishTab({
   }
 
   const NAV_GROUPS = [
+    {
+      label: "Overview",
+      items: [
+        { id: "overview", label: "Dashboard", short: "Home", icon: LayoutDashboard },
+      ],
+    },
     {
       label: "This week",
       items: [
@@ -3820,13 +3873,144 @@ function CommishTab({
     if (id === "games") setEditingWeek(null);
   }
 
+  // ── Commissioner dashboard: surfaces things needing attention ──────────────
+  function CommishDashboard() {
+    const alerts = [];
+    const members = leagueMeta.members || [];
+
+    // 1. Ungraded weeks (locked, have some scores, but not marked graded)
+    (leagueMeta.weeks || []).forEach((w) => {
+      const wd = weekCache[w];
+      if (!wd) return;
+      const hasScores = (wd.games || []).some((g) => g.homeScore != null && g.awayScore != null);
+      const allScored = (wd.games || []).length > 0 && (wd.games || []).every((g) => g.homeScore != null && g.awayScore != null);
+      if (allScored && !wd.graded) {
+        alerts.push({ kind: "grade", text: `Week ${w} has all scores in but isn't graded`, action: "results" });
+      } else if (wd.locked && hasScores && !wd.graded) {
+        alerts.push({ kind: "grade", text: `Week ${w} is in progress — check results`, action: "results", soft: true });
+      }
+    });
+
+    // 2. Unmarked underdog results (graded week, members with underdog picks but no result set)
+    (leagueMeta.weeks || []).forEach((w) => {
+      const wd = weekCache[w];
+      if (!wd || !wd.graded) return;
+      const wk = picksCache[w] || {};
+      const hasUnmarked = Object.values(wk).some(
+        (p) => p?.underdogPick && (p.underdogResult === null || p.underdogResult === undefined)
+      );
+      if (hasUnmarked) {
+        alerts.push({ kind: "underdog", text: `Week ${w} has underdog picks not yet marked win/loss`, action: "results" });
+      }
+    });
+
+    // 3. Current week — members who haven't picked
+    const openWeeks = (leagueMeta.weeks || []).filter((w) => {
+      const wd = weekCache[w];
+      return wd && !wd.graded;
+    });
+    const latestOpen = openWeeks.length ? Math.max(...openWeeks) : null;
+    if (latestOpen != null) {
+      const wk = picksCache[latestOpen] || {};
+      const missing = members.filter((m) => {
+        const p = wk[slugify(m)];
+        return !p || !p.picks || Object.keys(p.picks).length === 0;
+      });
+      if (missing.length > 0) {
+        alerts.push({
+          kind: "missing",
+          text: `Week ${latestOpen}: ${missing.length} of ${members.length} haven't picked`,
+          detail: missing.join(", "),
+          action: "games",
+        });
+      }
+    }
+
+    const kindStyle = {
+      grade:    { color: COLORS.goldBright, icon: CheckCircle2 },
+      underdog: { color: COLORS.goldBright, icon: Zap },
+      missing:  { color: COLORS.chalkDim,   icon: Users },
+    };
+
+    return (
+      <div className="space-y-4 cfb-fade-in">
+        <div className="text-xs" style={{ color: COLORS.muted }}>
+          <Users size={12} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
+          {members.length} in the pool
+        </div>
+
+        {alerts.length === 0 ? (
+          <div className="px-4 py-8 text-center" style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep }}>
+            <CheckCircle2 size={28} style={{ color: COLORS.gold, margin: "0 auto 8px" }} />
+            <div className="cfb-mono text-sm" style={{ color: COLORS.chalk }}>All caught up</div>
+            <div className="text-xs mt-1" style={{ color: COLORS.muted }}>
+              No ungraded weeks, missing picks, or unmarked results.
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.gold, letterSpacing: "0.06em" }}>
+              Needs attention ({alerts.length})
+            </div>
+            {alerts.map((a, i) => {
+              const st = kindStyle[a.kind] || kindStyle.grade;
+              const Icon = st.icon;
+              return (
+                <button
+                  key={i}
+                  onClick={() => goMode(a.action)}
+                  className="w-full text-left px-3 py-3 flex items-start gap-3 cfb-btn"
+                  style={{ border: `1px solid ${a.soft ? COLORS.line : COLORS.lineStrong}`, background: COLORS.fieldDeep, opacity: a.soft ? 0.7 : 1 }}
+                >
+                  <Icon size={16} style={{ color: st.color, flexShrink: 0, marginTop: 1 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="text-sm" style={{ color: COLORS.chalk }}>{a.text}</div>
+                    {a.detail && <div className="cfb-mono text-xs mt-0.5" style={{ color: COLORS.muted }}>{a.detail}</div>}
+                  </div>
+                  <ChevronRight size={15} style={{ color: COLORS.muted, flexShrink: 0, marginTop: 1 }} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Quick season snapshot */}
+        <div className="px-3 py-3 space-y-1.5" style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep }}>
+          <div className="cfb-mono text-xs uppercase mb-1" style={{ color: COLORS.chalkDim }}>Season snapshot</div>
+          <div className="flex justify-between text-sm">
+            <span style={{ color: COLORS.muted }}>Weeks created</span>
+            <span style={{ color: COLORS.chalk }}>{(leagueMeta.weeks || []).length}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span style={{ color: COLORS.muted }}>Weeks graded</span>
+            <span style={{ color: COLORS.chalk }}>
+              {(leagueMeta.weeks || []).filter((w) => weekCache[w]?.graded).length}
+            </span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span style={{ color: COLORS.muted }}>Win totals board</span>
+            <span style={{ color: COLORS.chalk }}>{(leagueMeta.winTotalsYears || []).length ? "set" : "not set"}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span style={{ color: COLORS.muted }}>Playoff board</span>
+            <span style={{ color: COLORS.chalk }}>{(leagueMeta.playoffYears || []).length ? "set" : "not set"}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Mode content — shared between desktop and mobile layouts
   const modeContent = (
     <div className="space-y-4 cfb-fade-in">
-      <div className="text-xs" style={{ color: COLORS.muted }}>
-        <Users size={12} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
-        {leagueMeta.members.length} in the pool: {leagueMeta.members.join(", ")}
-      </div>
+      {mode !== "overview" && (
+        <div className="text-xs" style={{ color: COLORS.muted }}>
+          <Users size={12} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
+          {leagueMeta.members.length} in the pool: {leagueMeta.members.join(", ")}
+        </div>
+      )}
+
+      {mode === "overview" && <CommishDashboard />}
 
       {mode === "games" && (
         <GamesManager

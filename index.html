@@ -17,19 +17,104 @@
     <meta name="apple-mobile-web-app-title" content="CFB Pool" />
     <link rel="apple-touch-icon" href="icon-180.png" />
 
-    <!-- Register service worker -->
+    <style>
+      /* "Update available" banner — shown when a new service worker is waiting */
+      #cfb-update-banner {
+        position: fixed;
+        left: 50%;
+        bottom: calc(72px + env(safe-area-inset-bottom));
+        transform: translateX(-50%);
+        z-index: 9999;
+        display: none;
+        align-items: center;
+        gap: 12px;
+        background: #D9A441;
+        color: #0c0c0e;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 10px 16px;
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        max-width: 90vw;
+      }
+      #cfb-update-banner button {
+        background: #0c0c0e;
+        color: #D9A441;
+        border: none;
+        border-radius: 5px;
+        padding: 6px 12px;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Update banner -->
+    <div id="cfb-update-banner">
+      <span>New version available</span>
+      <button id="cfb-update-btn" type="button">Update now</button>
+    </div>
+
+    <script type="module" src="/src/main.jsx"></script>
+
+    <!-- Service worker registration + update detection -->
     <script>
       if ('serviceWorker' in navigator) {
+        var refreshing = false;
+
+        // When the new SW takes control, reload once to load fresh assets
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (refreshing) return;
+          refreshing = true;
+          window.location.reload();
+        });
+
         window.addEventListener('load', function () {
-          navigator.serviceWorker.register('sw.js').catch(function (err) {
+          navigator.serviceWorker.register('sw.js').then(function (reg) {
+            var banner = document.getElementById('cfb-update-banner');
+            var btn = document.getElementById('cfb-update-btn');
+
+            function showBanner(waitingWorker) {
+              if (!waitingWorker) return;
+              banner.style.display = 'flex';
+              btn.onclick = function () {
+                waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+                banner.style.display = 'none';
+              };
+            }
+
+            // A new SW is already waiting (installed on a previous visit)
+            if (reg.waiting && navigator.serviceWorker.controller) {
+              showBanner(reg.waiting);
+            }
+
+            // A new SW starts installing while the app is open
+            reg.addEventListener('updatefound', function () {
+              var newWorker = reg.installing;
+              if (!newWorker) return;
+              newWorker.addEventListener('statechange', function () {
+                // Installed + an existing controller = this is an update, not first install
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  showBanner(newWorker);
+                }
+              });
+            });
+
+            // Check for updates whenever the app regains focus (home-screen reopen)
+            document.addEventListener('visibilitychange', function () {
+              if (document.visibilityState === 'visible') reg.update().catch(function(){});
+            });
+          }).catch(function (err) {
             console.warn('SW registration failed:', err);
           });
         });
       }
     </script>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

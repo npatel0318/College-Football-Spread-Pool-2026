@@ -9,7 +9,7 @@
 // Bump CACHE_NAME whenever you want to force all clients onto a fresh cache
 // (e.g. after a major deploy). The activate handler purges old caches.
 
-const CACHE_NAME = 'cfb-pool-v1';
+const CACHE_NAME = 'cfb-pool-v2';
 
 // App-shell files to pre-cache on install
 const PRECACHE = ['./', './index.html'];
@@ -28,10 +28,18 @@ const NEVER_CACHE = [
 
 // ── install ──────────────────────────────────────────────────────────────────
 self.addEventListener('install', (event) => {
-  self.skipWaiting(); // activate immediately, don't wait for old SW to die
+  // Do NOT auto-skipWaiting — the page decides when to activate the new SW
+  // (via the "update available" banner), so users aren't interrupted mid-action.
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE))
   );
+});
+
+// The page posts {type: 'SKIP_WAITING'} when the user taps "update now"
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 // ── activate ─────────────────────────────────────────────────────────────────
