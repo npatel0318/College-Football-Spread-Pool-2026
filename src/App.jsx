@@ -1338,11 +1338,11 @@ export default function App() {
     const existingDates = {};
     if (existing) {
       existing.teams.forEach((t) => {
-        if (t.firstGameISO) existingDates[t.school.toLowerCase()] = t.firstGameISO;
+        if (t.firstGameISO) existingDates[normalizeTeamName(t.school)] = t.firstGameISO;
       });
     }
     // Only fetch from ESPN if any team is missing a date
-    const anyMissing = teams.some((t) => !existingDates[t.school.toLowerCase()]);
+    const anyMissing = teams.some((t) => !existingDates[normalizeTeamName(t.school)]);
     let espnDates = {};
     if (anyMissing) {
       try {
@@ -1360,8 +1360,8 @@ export default function App() {
         teams: teams.map((t) => ({
           ...t,
           finalWins: finalMap[t.id] ?? null,
-          firstGameISO: existingDates[t.school.toLowerCase()]
-            || espnDates[t.school.toLowerCase()]
+          firstGameISO: existingDates[normalizeTeamName(t.school)]
+            || espnDates[normalizeTeamName(t.school)]
             || null,
         })),
       };
@@ -1372,7 +1372,7 @@ export default function App() {
         teams: teams.map((t) => ({
           ...t,
           finalWins: null,
-          firstGameISO: espnDates[t.school.toLowerCase()] || null,
+          firstGameISO: espnDates[normalizeTeamName(t.school)] || null,
         })),
       };
     }
@@ -1389,6 +1389,30 @@ export default function App() {
       setLeagueMeta(updatedMeta); saveBootstrap(updatedMeta);
     }
     return true;
+  }
+
+  // Re-fetch first-game kickoff dates from ESPN and merge into the saved board,
+  // WITHOUT re-importing. Fixes boards saved before dates matched, or when the
+  // schedule wasn't posted yet. Returns { matched, total } or null on failure.
+  async function refreshWinTotalsKickoffs(year) {
+    const board = winTotalsCache[year];
+    if (!board) return null;
+    let espnDates;
+    try {
+      espnDates = await fetchFirstGameDates(year);
+    } catch {
+      return null;
+    }
+    let matched = 0;
+    const newTeams = board.teams.map((t) => {
+      const iso = espnDates[normalizeTeamName(t.school)] || null;
+      if (iso) matched++;
+      return { ...t, firstGameISO: iso ?? t.firstGameISO ?? null };
+    });
+    const payload = { ...board, teams: newTeams };
+    const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (r) setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
+    return { matched, total: board.teams.length };
   }
 
   async function toggleWinTotalsLock(year) {
@@ -1556,10 +1580,10 @@ export default function App() {
     const existingDates = {};
     if (existing) {
       existing.teams.forEach((t) => {
-        if (t.firstGameISO) existingDates[t.school.toLowerCase()] = t.firstGameISO;
+        if (t.firstGameISO) existingDates[normalizeTeamName(t.school)] = t.firstGameISO;
       });
     }
-    const anyMissing = teams.some((t) => !existingDates[t.school.toLowerCase()]);
+    const anyMissing = teams.some((t) => !existingDates[normalizeTeamName(t.school)]);
     let espnDates = {};
     if (anyMissing) {
       try { espnDates = await fetchFirstGameDates(year); } catch { /* non-fatal */ }
@@ -1575,7 +1599,7 @@ export default function App() {
         teams: teams.map((t) => ({
           ...t,
           madePlayoff: finalMap[t.id] ?? null,
-          firstGameISO: existingDates[t.school.toLowerCase()] || espnDates[t.school.toLowerCase()] || null,
+          firstGameISO: existingDates[normalizeTeamName(t.school)] || espnDates[normalizeTeamName(t.school)] || null,
         })),
       };
     } else {
@@ -1585,7 +1609,7 @@ export default function App() {
         teams: teams.map((t) => ({
           ...t,
           madePlayoff: null,
-          firstGameISO: espnDates[t.school.toLowerCase()] || null,
+          firstGameISO: espnDates[normalizeTeamName(t.school)] || null,
         })),
       };
     }
@@ -1610,6 +1634,28 @@ export default function App() {
     const payload = { ...board, locked: !board.locked };
     const r = await storage.set(`playoff:${year}:board`, JSON.stringify(payload), true).catch(() => null);
     if (r) setPlayoffCache((prev) => ({ ...prev, [year]: payload }));
+  }
+
+  // Re-fetch playoff team kickoff dates from ESPN and merge into the saved board.
+  async function refreshPlayoffKickoffs(year) {
+    const board = playoffCache[year];
+    if (!board) return null;
+    let espnDates;
+    try {
+      espnDates = await fetchFirstGameDates(year);
+    } catch {
+      return null;
+    }
+    let matched = 0;
+    const newTeams = board.teams.map((t) => {
+      const iso = espnDates[normalizeTeamName(t.school)] || null;
+      if (iso) matched++;
+      return { ...t, firstGameISO: iso ?? t.firstGameISO ?? null };
+    });
+    const payload = { ...board, teams: newTeams };
+    const r = await storage.set(`playoff:${year}:board`, JSON.stringify(payload), true).catch(() => null);
+    if (r) setPlayoffCache((prev) => ({ ...prev, [year]: payload }));
+    return { matched, total: board.teams.length };
   }
 
   async function savePlayoffResults(year, teamsWithMadePlayoff) {
@@ -4064,6 +4110,7 @@ function CommishTab({
           loadWinTotals={loadWinTotals}
           saveWinTotalsBoard={saveWinTotalsBoard}
           toggleWinTotalsLock={toggleWinTotalsLock}
+          refreshWinTotalsKickoffs={refreshWinTotalsKickoffs}
         />
       )}
       {mode === "wtResults" && (
@@ -4083,6 +4130,7 @@ function CommishTab({
           loadPlayoff={loadPlayoff}
           savePlayoffBoard={savePlayoffBoard}
           togglePlayoffLock={togglePlayoffLock}
+          refreshPlayoffKickoffs={refreshPlayoffKickoffs}
         />
       )}
       {mode === "pResults" && (
@@ -4445,33 +4493,90 @@ async function fetchEspnWeekDates(year, week) {
 // Fetch each team's first regular-season game kickoff date from ESPN.
 // Returns a map: { "alabama": "2026-08-30T00:00:00Z", ... }
 async function fetchFirstGameDates(year) {
+  // Returns a normalized-name -> earliest kickoff ISO map.
+  // ESPN exposes several name fields per team (displayName "Ole Miss Rebels",
+  // location "Ole Miss", shortDisplayName, abbreviation, nickname). Boards store
+  // the location-style name, so we index EVERY variant to a shared normalizer so
+  // "Ole Miss" on the board matches "Ole Miss Rebels" from ESPN.
   const teamDates = {};
-  // Fetch weeks 0–2 to cover all early-season kickoffs
-  for (const week of [0, 1, 2]) {
+  function record(nameVariant, kickoffISO) {
+    if (!nameVariant) return;
+    const key = normalizeTeamName(nameVariant);
+    if (!key) return;
+    if (!teamDates[key] || new Date(kickoffISO) < new Date(teamDates[key])) {
+      teamDates[key] = kickoffISO;
+    }
+  }
+  // Weeks 0–3 covers every early-season kickoff (some teams debut in week 3)
+  for (const week of [0, 1, 2, 3]) {
     try {
       const res = await fetch(
         `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
-        `?seasontype=2&week=${week}&year=${year}&limit=200`
+        `?seasontype=2&week=${week}&year=${year}&limit=300`
       );
       if (!res.ok) continue;
       const data = await res.json();
       for (const event of data.events || []) {
         const comp = event.competitions?.[0];
         if (!comp?.date) continue;
-        const kickoffISO = comp.date; // full ISO string from ESPN
+        const kickoffISO = comp.date;
         for (const competitor of comp.competitors || []) {
-          const name = competitor.team?.displayName;
-          if (!name) continue;
-          const key = name.toLowerCase();
-          // Keep the earliest game date for each team
-          if (!teamDates[key] || new Date(kickoffISO) < new Date(teamDates[key])) {
-            teamDates[key] = kickoffISO;
-          }
+          const t = competitor.team;
+          if (!t) continue;
+          // Index all available name variants to the same date
+          record(t.displayName, kickoffISO);
+          record(t.location, kickoffISO);
+          record(t.shortDisplayName, kickoffISO);
+          record(t.name, kickoffISO);
+          record(t.nickname, kickoffISO);
+          if (t.location && t.name) record(`${t.location} ${t.name}`, kickoffISO);
         }
       }
     } catch { /* non-fatal */ }
   }
   return teamDates;
+}
+
+// Normalizer shared by board-name -> ESPN-name matching. Lowercases, strips
+// punctuation and common suffixes, collapses whitespace, and applies a few
+// known aliases so board names line up with ESPN's various name fields.
+function normalizeTeamName(s) {
+  if (!s) return "";
+  let n = String(s).toLowerCase().trim();
+  // Known aliases (board name -> canonical) — extend as needed
+  const ALIASES = {
+    "miami": "miami",
+    "miami fl": "miami",
+    "miami florida": "miami",
+    "miami (fl)": "miami",
+    "miami hurricanes": "miami",
+    "miami (oh)": "miami oh",
+    "miami ohio": "miami oh",
+    "ole miss": "ole miss",
+    "ole miss rebels": "ole miss",
+    "uconn": "connecticut",
+    "connecticut": "connecticut",
+    "nc state": "nc state",
+    "north carolina state": "nc state",
+    "app state": "appalachian state",
+    "louisiana monroe": "louisiana monroe",
+    "ul monroe": "louisiana monroe",
+    "louisiana-monroe": "louisiana monroe",
+    "west virginia": "west virginia",
+    "wv mountaineers": "west virginia",
+    "san jose state": "san jose state",
+    "san josé state": "san jose state",
+    "sam houston": "sam houston",
+    "sam houston state": "sam houston",
+    "florida international": "florida international",
+    "fiu": "florida international",
+  };
+  if (ALIASES[n]) return ALIASES[n];
+  // Strip trailing mascot/nickname noise is hard generically, so we keep the
+  // core string but remove punctuation and extra spaces.
+  n = n.replace(/[().'’&]/g, " ").replace(/\s+/g, " ").trim();
+  if (ALIASES[n]) return ALIASES[n];
+  return n;
 }
 
 // Fetch each team's REGULAR-SEASON record + scheduled game count from ESPN.
@@ -5986,7 +6091,7 @@ function WinTotalsGrid({ leagueMeta, board, picksCache, slugToName }) {
 
 /* --------------------------- win totals commissioner ------------------------- */
 
-function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsBoard, toggleWinTotalsLock }) {
+function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, saveWinTotalsBoard, toggleWinTotalsLock, refreshWinTotalsKickoffs }) {
   const years = leagueMeta.winTotalsYears || [];
   const [selectedYear, setSelectedYear] = useState(null); // null = new board
   const [yearInput, setYearInput] = useState(String(defaultWinTotalsYear()));
@@ -5996,6 +6101,8 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [refreshingDates, setRefreshingDates] = useState(false);
+  const [refreshNote, setRefreshNote] = useState(null);
 
   useEffect(() => {
     if (selectedYear != null && !winTotalsCache[selectedYear]) {
@@ -6112,6 +6219,28 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
             {currentBoard.locked ? <Lock size={12} /> : <Unlock size={12} />}
             {currentBoard.locked ? "locked — click to open" : "open — click to lock"}
           </button>
+        </div>
+      )}
+
+      {selectedYear != null && currentBoard && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={async () => {
+              setRefreshingDates(true);
+              setRefreshNote(null);
+              const res = await refreshWinTotalsKickoffs(selectedYear);
+              setRefreshingDates(false);
+              if (res) setRefreshNote(`${res.matched} of ${res.total} teams got kickoff dates`);
+              else setRefreshNote("Couldn't reach ESPN — try again in a moment.");
+            }}
+            disabled={refreshingDates}
+            className="cfb-mono text-xs flex items-center gap-1.5"
+            style={{ color: COLORS.chalkDim }}
+          >
+            <RefreshCw size={11} className={refreshingDates ? "animate-spin" : ""} />
+            {refreshingDates ? "Fetching kickoff dates…" : "Refresh kickoff lock dates from ESPN"}
+          </button>
+          {refreshNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{refreshNote}</span>}
         </div>
       )}
 
@@ -6692,7 +6821,7 @@ function PlayoffGrid({ leagueMeta, board, picksCache, slugToName }) {
 
 /* ----------------------------- playoff commissioner --------------------------- */
 
-function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayoffBoard, togglePlayoffLock }) {
+function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayoffBoard, togglePlayoffLock, refreshPlayoffKickoffs }) {
   const years = leagueMeta.playoffYears || [];
   const [selectedYear, setSelectedYear] = useState(null);
   const [yearInput, setYearInput] = useState(String(defaultWinTotalsYear()));
@@ -6703,6 +6832,8 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
   const [importError, setImportError] = useState(null);
   const [importNotice, setImportNotice] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [refreshingDates, setRefreshingDates] = useState(false);
+  const [refreshNote, setRefreshNote] = useState(null);
 
   useEffect(() => {
     if (selectedYear != null && !playoffCache[selectedYear]) {
@@ -6836,6 +6967,28 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
             {currentBoard.locked ? <Lock size={12} /> : <Unlock size={12} />}
             {currentBoard.locked ? "locked — click to open" : "open — click to lock"}
           </button>
+        </div>
+      )}
+
+      {selectedYear != null && currentBoard && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={async () => {
+              setRefreshingDates(true);
+              setRefreshNote(null);
+              const res = await refreshPlayoffKickoffs(selectedYear);
+              setRefreshingDates(false);
+              if (res) setRefreshNote(`${res.matched} of ${res.total} teams got kickoff dates`);
+              else setRefreshNote("Couldn't reach ESPN — try again in a moment.");
+            }}
+            disabled={refreshingDates}
+            className="cfb-mono text-xs flex items-center gap-1.5"
+            style={{ color: COLORS.chalkDim }}
+          >
+            <RefreshCw size={11} className={refreshingDates ? "animate-spin" : ""} />
+            {refreshingDates ? "Fetching kickoff dates…" : "Refresh kickoff lock dates from ESPN"}
+          </button>
+          {refreshNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{refreshNote}</span>}
         </div>
       )}
 
