@@ -2385,6 +2385,10 @@ export default function App() {
             saveWinTotalsBoard={saveWinTotalsBoard}
             toggleWinTotalsLock={toggleWinTotalsLock}
             saveWinTotalsResults={saveWinTotalsResults}
+            autoGradeWinTotals={autoGradeWinTotals}
+            checkWinTotalsMatches={checkWinTotalsMatches}
+            refreshWinTotalsKickoffs={refreshWinTotalsKickoffs}
+            refreshPlayoffKickoffs={refreshPlayoffKickoffs}
             playoffCache={playoffCache}
             loadPlayoff={loadPlayoff}
             savePlayoffBoard={savePlayoffBoard}
@@ -3850,6 +3854,10 @@ function CommishTab({
   saveWinTotalsBoard,
   toggleWinTotalsLock,
   saveWinTotalsResults,
+  autoGradeWinTotals,
+  checkWinTotalsMatches,
+  refreshWinTotalsKickoffs,
+  refreshPlayoffKickoffs,
   playoffCache,
   loadPlayoff,
   savePlayoffBoard,
