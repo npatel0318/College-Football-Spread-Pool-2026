@@ -1404,15 +1404,17 @@ export default function App() {
       return null;
     }
     let matched = 0;
+    const unmatched = [];
     const newTeams = board.teams.map((t) => {
       const iso = espnDates[normalizeTeamName(t.school)] || null;
       if (iso) matched++;
+      else unmatched.push(t.school);
       return { ...t, firstGameISO: iso ?? t.firstGameISO ?? null };
     });
     const payload = { ...board, teams: newTeams };
     const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
     if (r) setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
-    return { matched, total: board.teams.length };
+    return { matched, total: board.teams.length, unmatched, sampleEspnKeys: Object.keys(espnDates).slice(0, 8) };
   }
 
   async function toggleWinTotalsLock(year) {
@@ -1647,15 +1649,17 @@ export default function App() {
       return null;
     }
     let matched = 0;
+    const unmatched = [];
     const newTeams = board.teams.map((t) => {
       const iso = espnDates[normalizeTeamName(t.school)] || null;
       if (iso) matched++;
+      else unmatched.push(t.school);
       return { ...t, firstGameISO: iso ?? t.firstGameISO ?? null };
     });
     const payload = { ...board, teams: newTeams };
     const r = await storage.set(`playoff:${year}:board`, JSON.stringify(payload), true).catch(() => null);
     if (r) setPlayoffCache((prev) => ({ ...prev, [year]: payload }));
-    return { matched, total: board.teams.length };
+    return { matched, total: board.teams.length, unmatched, sampleEspnKeys: Object.keys(espnDates).slice(0, 8) };
   }
 
   async function savePlayoffResults(year, teamsWithMadePlayoff) {
@@ -6223,24 +6227,41 @@ function WinTotalsBoardManager({ leagueMeta, winTotalsCache, loadWinTotals, save
       )}
 
       {selectedYear != null && currentBoard && (
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={async () => {
-              setRefreshingDates(true);
-              setRefreshNote(null);
-              const res = await refreshWinTotalsKickoffs(selectedYear);
-              setRefreshingDates(false);
-              if (res) setRefreshNote(`${res.matched} of ${res.total} teams got kickoff dates`);
-              else setRefreshNote("Couldn't reach ESPN — try again in a moment.");
-            }}
-            disabled={refreshingDates}
-            className="cfb-mono text-xs flex items-center gap-1.5"
-            style={{ color: COLORS.chalkDim }}
-          >
-            <RefreshCw size={11} className={refreshingDates ? "animate-spin" : ""} />
-            {refreshingDates ? "Fetching kickoff dates…" : "Refresh kickoff lock dates from ESPN"}
-          </button>
-          {refreshNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{refreshNote}</span>}
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={async () => {
+                setRefreshingDates(true);
+                setRefreshNote(null);
+                const res = await refreshWinTotalsKickoffs(selectedYear);
+                setRefreshingDates(false);
+                if (res) setRefreshNote(res);
+                else setRefreshNote({ error: true });
+              }}
+              disabled={refreshingDates}
+              className="cfb-mono text-xs flex items-center gap-1.5"
+              style={{ color: COLORS.chalkDim }}
+            >
+              <RefreshCw size={11} className={refreshingDates ? "animate-spin" : ""} />
+              {refreshingDates ? "Fetching kickoff dates…" : "Refresh kickoff lock dates from ESPN"}
+            </button>
+          </div>
+          {refreshNote && refreshNote.error && (
+            <div className="cfb-mono text-xs" style={{ color: COLORS.redBright }}>Couldn't reach ESPN — try again in a moment.</div>
+          )}
+          {refreshNote && !refreshNote.error && (
+            <div className="cfb-mono text-xs space-y-1" style={{ color: COLORS.muted }}>
+              <div style={{ color: refreshNote.matched === refreshNote.total ? COLORS.goldBright : COLORS.chalk }}>
+                {refreshNote.matched} of {refreshNote.total} teams got kickoff dates
+              </div>
+              {refreshNote.unmatched && refreshNote.unmatched.length > 0 && (
+                <div>
+                  <span style={{ color: COLORS.redBright }}>No ESPN match ({refreshNote.unmatched.length}):</span>{" "}
+                  {refreshNote.unmatched.join(", ")}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -6971,24 +6992,41 @@ function PlayoffBoardManager({ leagueMeta, playoffCache, loadPlayoff, savePlayof
       )}
 
       {selectedYear != null && currentBoard && (
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={async () => {
-              setRefreshingDates(true);
-              setRefreshNote(null);
-              const res = await refreshPlayoffKickoffs(selectedYear);
-              setRefreshingDates(false);
-              if (res) setRefreshNote(`${res.matched} of ${res.total} teams got kickoff dates`);
-              else setRefreshNote("Couldn't reach ESPN — try again in a moment.");
-            }}
-            disabled={refreshingDates}
-            className="cfb-mono text-xs flex items-center gap-1.5"
-            style={{ color: COLORS.chalkDim }}
-          >
-            <RefreshCw size={11} className={refreshingDates ? "animate-spin" : ""} />
-            {refreshingDates ? "Fetching kickoff dates…" : "Refresh kickoff lock dates from ESPN"}
-          </button>
-          {refreshNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{refreshNote}</span>}
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={async () => {
+                setRefreshingDates(true);
+                setRefreshNote(null);
+                const res = await refreshPlayoffKickoffs(selectedYear);
+                setRefreshingDates(false);
+                if (res) setRefreshNote(res);
+                else setRefreshNote({ error: true });
+              }}
+              disabled={refreshingDates}
+              className="cfb-mono text-xs flex items-center gap-1.5"
+              style={{ color: COLORS.chalkDim }}
+            >
+              <RefreshCw size={11} className={refreshingDates ? "animate-spin" : ""} />
+              {refreshingDates ? "Fetching kickoff dates…" : "Refresh kickoff lock dates from ESPN"}
+            </button>
+          </div>
+          {refreshNote && refreshNote.error && (
+            <div className="cfb-mono text-xs" style={{ color: COLORS.redBright }}>Couldn't reach ESPN — try again in a moment.</div>
+          )}
+          {refreshNote && !refreshNote.error && (
+            <div className="cfb-mono text-xs space-y-1" style={{ color: COLORS.muted }}>
+              <div style={{ color: refreshNote.matched === refreshNote.total ? COLORS.goldBright : COLORS.chalk }}>
+                {refreshNote.matched} of {refreshNote.total} teams got kickoff dates
+              </div>
+              {refreshNote.unmatched && refreshNote.unmatched.length > 0 && (
+                <div>
+                  <span style={{ color: COLORS.redBright }}>No ESPN match ({refreshNote.unmatched.length}):</span>{" "}
+                  {refreshNote.unmatched.join(", ")}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
