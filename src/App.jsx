@@ -1280,12 +1280,15 @@ export default function App() {
     // One-time fetch for the board
     loadWinTotals(selectedWinTotalsYear, false);
 
-    // Auto-grade from ESPN records (throttled to once per 10 min per year)
+    // Auto-refresh kickoff lock dates + auto-grade from ESPN (throttled per year).
+    // This keeps per-team locks accurate without the commissioner manually
+    // clicking "refresh" — stale/wrong dates self-heal on tab open.
     const year = selectedWinTotalsYear;
     const gradeKey = `wt-autograde-${year}`;
     const lastGrade = winTotalsGradeThrottleRef.current[gradeKey] || 0;
     if (Date.now() - lastGrade > 10 * 60 * 1000) {
       winTotalsGradeThrottleRef.current[gradeKey] = Date.now();
+      refreshWinTotalsKickoffs(year).catch(() => {});
       autoGradeWinTotals(year).catch(() => {});
     }
 
@@ -1522,6 +1525,7 @@ export default function App() {
   // Playoff: board loads once, picks use a real-time listener so everyone
   // sees submissions as they happen (same pattern as weekly picks / win totals).
   const playoffPicksListenerRef = useRef(null);
+  const playoffRefreshThrottleRef = useRef({});
 
   useEffect(() => {
     if (playoffPicksListenerRef.current) {
@@ -1534,6 +1538,16 @@ export default function App() {
     loadPlayoff(selectedPlayoffYear, false); // one-time board fetch
 
     const year = selectedPlayoffYear;
+
+    // Auto-refresh kickoff lock dates (throttled per year) so per-team locks stay
+    // accurate without the commissioner manually refreshing.
+    const refreshKey = `pf-refresh-${year}`;
+    const lastRefresh = playoffRefreshThrottleRef.current[refreshKey] || 0;
+    if (Date.now() - lastRefresh > 10 * 60 * 1000) {
+      playoffRefreshThrottleRef.current[refreshKey] = Date.now();
+      refreshPlayoffKickoffs(year).catch(() => {});
+    }
+
     const unsub = onSnapshot(
       query(collection(db, "playoffPicks"), where("pYear", "==", year)),
       (snap) => {
