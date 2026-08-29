@@ -1452,7 +1452,7 @@ export default function App() {
     let updated = 0;
     const newTeams = board.teams.map((team) => {
       if (team.manualFinal) return team; // respect manual override
-      const rec = records[team.school.toLowerCase()];
+      const rec = records[normalizeTeamName(team.school)];
       if (!rec) return team;
       const { finalWins, clinched } = winTotalClinch(Number(team.line), rec);
       if (finalWins != null && finalWins !== team.finalWins) {
@@ -1485,7 +1485,7 @@ export default function App() {
     const matched = [];
     const unmatched = [];
     board.teams.forEach((team) => {
-      if (records[team.school.toLowerCase()]) matched.push(team.school);
+      if (records[normalizeTeamName(team.school)]) matched.push(team.school);
       else unmatched.push(team.school);
     });
     return { matched, unmatched, total: board.teams.length };
@@ -4508,8 +4508,7 @@ async function fetchFirstGameDates(year) {
   // Returns a normalized-name -> earliest kickoff ISO map.
   // ESPN exposes several name fields per team (displayName "Ole Miss Rebels",
   // location "Ole Miss", shortDisplayName, abbreviation, nickname). Boards store
-  // the location-style name, so we index EVERY variant to a shared normalizer so
-  // "Ole Miss" on the board matches "Ole Miss Rebels" from ESPN.
+  // the location-style name, so we index EVERY variant to a shared normalizer.
   const teamDates = {};
   function record(nameVariant, kickoffISO) {
     if (!nameVariant) return;
@@ -4519,12 +4518,14 @@ async function fetchFirstGameDates(year) {
       teamDates[key] = kickoffISO;
     }
   }
-  // Weeks 0–3 covers every early-season kickoff (some teams debut in week 3)
-  for (const week of [0, 1, 2, 3]) {
+  // CRITICAL: groups=80 returns ALL FBS games. Without it, ESPN's scoreboard
+  // returns only a featured subset (~a dozen marquee games), which is why most
+  // teams previously never matched. Weeks 1–5 covers every early-season debut.
+  for (const week of [1, 2, 3, 4, 5]) {
     try {
       const res = await fetch(
         `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
-        `?seasontype=2&week=${week}&year=${year}&limit=300`
+        `?groups=80&seasontype=2&week=${week}&year=${year}&limit=400`
       );
       if (!res.ok) continue;
       const data = await res.json();
@@ -4535,7 +4536,6 @@ async function fetchFirstGameDates(year) {
         for (const competitor of comp.competitors || []) {
           const t = competitor.team;
           if (!t) continue;
-          // Index all available name variants to the same date
           record(t.displayName, kickoffISO);
           record(t.location, kickoffISO);
           record(t.shortDisplayName, kickoffISO);
@@ -4555,38 +4555,60 @@ async function fetchFirstGameDates(year) {
 function normalizeTeamName(s) {
   if (!s) return "";
   let n = String(s).toLowerCase().trim();
-  // Known aliases (board name -> canonical) — extend as needed
+  // Strip accents (San José -> san jose) and collapse punctuation early so the
+  // alias lookup and the fallback both operate on a clean string.
+  n = n.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  n = n.replace(/[().'’&/\-]/g, " ").replace(/\s+/g, " ").trim();
+  // Known aliases (any name variant -> canonical key). Both board names and
+  // ESPN name variants pass through here, so they meet at the same canonical key.
   const ALIASES = {
     "miami": "miami",
     "miami fl": "miami",
     "miami florida": "miami",
-    "miami (fl)": "miami",
     "miami hurricanes": "miami",
-    "miami (oh)": "miami oh",
+    "miami oh": "miami oh",
     "miami ohio": "miami oh",
+    "miami redhawks": "miami oh",
     "ole miss": "ole miss",
     "ole miss rebels": "ole miss",
+    "mississippi": "ole miss",
     "uconn": "connecticut",
     "connecticut": "connecticut",
+    "connecticut huskies": "connecticut",
     "nc state": "nc state",
     "north carolina state": "nc state",
+    "nc state wolfpack": "nc state",
     "app state": "appalachian state",
+    "appalachian st": "appalachian state",
     "louisiana monroe": "louisiana monroe",
     "ul monroe": "louisiana monroe",
-    "louisiana-monroe": "louisiana monroe",
+    "ulm": "louisiana monroe",
+    "louisiana lafayette": "louisiana",
+    "ul lafayette": "louisiana",
     "west virginia": "west virginia",
     "wv mountaineers": "west virginia",
     "san jose state": "san jose state",
-    "san josé state": "san jose state",
+    "san jose st": "san jose state",
     "sam houston": "sam houston",
     "sam houston state": "sam houston",
     "florida international": "florida international",
     "fiu": "florida international",
+    "southern miss": "southern miss",
+    "southern mississippi": "southern miss",
+    "middle tennessee": "middle tennessee",
+    "middle tennessee state": "middle tennessee",
+    "mtsu": "middle tennessee",
+    "old dominion": "old dominion",
+    "florida atlantic": "florida atlantic",
+    "fau": "florida atlantic",
+    "massachusetts": "massachusetts",
+    "umass": "massachusetts",
+    "south florida": "south florida",
+    "usf": "south florida",
+    "north dakota state": "north dakota state",
+    "sacramento state": "sacramento state",
+    "sacramento st": "sacramento state",
   };
-  if (ALIASES[n]) return ALIASES[n];
-  // Strip trailing mascot/nickname noise is hard generically, so we keep the
-  // core string but remove punctuation and extra spaces.
-  n = n.replace(/[().'’&]/g, " ").replace(/\s+/g, " ").trim();
   if (ALIASES[n]) return ALIASES[n];
   return n;
 }
@@ -4597,16 +4619,17 @@ function normalizeTeamName(s) {
 // (seasontype=3) and bowls/playoff (seasontype=4) are excluded by only requesting
 // seasontype=2. Returns { "alabama": { wins, losses, scheduled, completed }, ... }
 async function fetchTeamRecords(year) {
-  const records = {}; // lowerName -> { wins, losses, scheduled, completed }
+  const records = {}; // normalizedName -> { wins, losses, scheduled, completed }
   function ensure(key) {
     if (!records[key]) records[key] = { wins: 0, losses: 0, scheduled: 0, completed: 0 };
     return records[key];
   }
   for (let week = 1; week <= 16; week++) {
     try {
+      // groups=80 = all FBS games (without it ESPN returns only featured games)
       const res = await fetch(
         `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
-        `?seasontype=2&week=${week}&year=${year}&limit=200`
+        `?groups=80&seasontype=2&week=${week}&year=${year}&limit=400`
       );
       if (!res.ok) continue;
       const data = await res.json();
@@ -4617,15 +4640,24 @@ async function fetchTeamRecords(year) {
         const completed = comp.status?.type?.completed === true;
         const competitors = comp.competitors || [];
         for (const c of competitors) {
-          const name = c.team?.displayName;
-          if (!name) continue;
-          const key = name.toLowerCase();
-          const rec = ensure(key);
-          rec.scheduled += 1; // this is a scheduled regular-season game
-          if (completed && status === "post") {
-            rec.completed += 1;
-            if (c.winner === true) rec.wins += 1;
-            else if (c.winner === false) rec.losses += 1;
+          const t = c.team;
+          if (!t) continue;
+          // Index this game under every name variant so board names match reliably.
+          // Use a Set of keys so we only count the game once per team.
+          const keys = new Set(
+            [t.displayName, t.location, t.shortDisplayName, t.name,
+             t.location && t.name ? `${t.location} ${t.name}` : null]
+              .map((n) => normalizeTeamName(n))
+              .filter(Boolean)
+          );
+          for (const key of keys) {
+            const rec = ensure(key);
+            rec.scheduled += 1;
+            if (completed && status === "post") {
+              rec.completed += 1;
+              if (c.winner === true) rec.wins += 1;
+              else if (c.winner === false) rec.losses += 1;
+            }
           }
         }
       }
