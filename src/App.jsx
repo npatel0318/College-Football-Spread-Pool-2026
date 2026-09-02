@@ -1156,7 +1156,7 @@ export default function App() {
     const espnGames = [];
     for (const yyyymmdd of dates) {
       try {
-        const url = `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=${yyyymmdd}&limit=200`;
+        const url = `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?groups=80&dates=${yyyymmdd}&limit=400`;
         const res = await fetch(url);
         if (!res.ok) continue;
         const data = await res.json();
@@ -1169,6 +1169,10 @@ export default function App() {
           espnGames.push({
             homeTeam: homeComp.team?.displayName || "",
             awayTeam: awayComp.team?.displayName || "",
+            homeLocation: homeComp.team?.location || "",
+            awayLocation: awayComp.team?.location || "",
+            homeShort: homeComp.team?.shortDisplayName || "",
+            awayShort: awayComp.team?.shortDisplayName || "",
             homeScore: homeComp.score != null ? Number(homeComp.score) : null,
             awayScore: awayComp.score != null ? Number(awayComp.score) : null,
             completed: comp.status?.type?.completed === true,
@@ -1180,24 +1184,61 @@ export default function App() {
     return espnGames;
   }
 
+  // Safe game matcher. Uses the shared normalizeTeamName (accents, aliases,
+  // UConn↔Connecticut, etc.) and REQUIRES both teams to agree, so we never bind
+  // to the wrong game. ESPN's displayName includes the mascot ("Ohio State
+  // Buckeyes"), so we match against every ESPN name variant — location and
+  // shortDisplayName are mascot-free and line up with the board's team names.
+  // A home-only fallback is allowed ONLY when provably unambiguous (exactly one
+  // ESPN game has that home team) — this covers FBS-vs-FCS where the FCS
+  // opponent's name may not normalize cleanly.
+  function espnHomeKeys(e) {
+    return new Set([e.homeTeam, e.homeLocation, e.homeShort].map(normalizeTeamName).filter(Boolean));
+  }
+  function espnAwayKeys(e) {
+    return new Set([e.awayTeam, e.awayLocation, e.awayShort].map(normalizeTeamName).filter(Boolean));
+  }
   function matchGameToEspn(game, espnGames) {
-    const homeLower = (game.home || "").toLowerCase();
-    const awayLower = (game.away || "").toLowerCase();
-    // 1. Exact match on both teams
-    let match = espnGames.find(
-      (e) => e.homeTeam.toLowerCase() === homeLower && e.awayTeam.toLowerCase() === awayLower
-    );
-    if (match) return match;
-    // 2. Exact home team match (away might differ slightly)
-    match = espnGames.find((e) => e.homeTeam.toLowerCase() === homeLower);
-    if (match) return match;
-    // 3. First-word school name match (strips mascot)
-    const homeFirst = homeLower.split(" ")[0];
-    const awayFirst = awayLower.split(" ")[0];
-    match = espnGames.find(
-      (e) => e.homeTeam.toLowerCase().startsWith(homeFirst) && e.awayTeam.toLowerCase().startsWith(awayFirst)
-    );
-    if (match) return match;
+    const gh = normalizeTeamName(game.home);
+    const ga = normalizeTeamName(game.away);
+    if (!gh || !ga) return null;
+    const loose = (set, target) => {
+      for (const k of set) { if (k === target || k.startsWith(target) || target.startsWith(k)) return true; }
+      return false;
+    };
+
+    // Tier 1: both teams match exactly (any variant), correct orientation
+    let m = espnGames.find((e) => espnHomeKeys(e).has(gh) && espnAwayKeys(e).has(ga));
+    if (m) return m;
+
+    // Tier 2: both exact, home/away swapped (orientation differences)
+    m = espnGames.find((e) => espnHomeKeys(e).has(ga) && espnAwayKeys(e).has(gh));
+    if (m) return m;
+
+    // Tier 3: one side exact, the other a loose prefix/substring on any variant.
+    // Both sides must still relate — never a single-side match here.
+    m = espnGames.find((e) => {
+      const hk = espnHomeKeys(e), ak = espnAwayKeys(e);
+      return (hk.has(gh) && loose(ak, ga)) || (loose(hk, gh) && ak.has(ga));
+    });
+    if (m) return m;
+
+    // Tier 4 (FBS-vs-FCS safety net): home matches exactly AND is unambiguous
+    // (exactly one ESPN game has that home team) AND the board's away team does
+    // NOT appear anywhere else in the slate. The last condition is the safety
+    // catch: if the away team shows up in another ESPN game, something is
+    // inconsistent and we must NOT force a home-only bind. When the away team is
+    // truly absent (a genuine FCS opponent not in the FBS feed), binding on the
+    // unambiguous home team is safe — a team plays once per window.
+    const homeExactMatches = espnGames.filter((e) => espnHomeKeys(e).has(gh));
+    if (homeExactMatches.length === 1) {
+      const awaySeenElsewhere = espnGames.some((e) => {
+        const hk = espnHomeKeys(e), ak = espnAwayKeys(e);
+        return hk.has(ga) || ak.has(ga);
+      });
+      if (!awaySeenElsewhere) return homeExactMatches[0];
+    }
+
     return null;
   }
 
@@ -4511,7 +4552,7 @@ async function fetchLiveGameDetails(week) {
   for (const yyyymmdd of dates) {
     try {
       const res = await fetch(
-        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=${yyyymmdd}&limit=200`
+        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?groups=80&dates=${yyyymmdd}&limit=400`
       );
       if (!res.ok) continue;
       const data = await res.json();
@@ -4523,19 +4564,24 @@ async function fetchLiveGameDetails(week) {
         const awayComp = comp.competitors?.find((c) => c.homeAway === "away");
         if (!homeComp || !awayComp) continue;
 
-        const espnHome = (homeComp.team?.displayName || "").toLowerCase();
-        const espnAway = (awayComp.team?.displayName || "").toLowerCase();
+        const ehKeys = new Set([homeComp.team?.displayName, homeComp.team?.location, homeComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
+        const eaKeys = new Set([awayComp.team?.displayName, awayComp.team?.location, awayComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
 
-        // 3-level matching (same as matchGameToEspn in App)
+        // Same safe matching as autoGrade: require both teams to agree, with a
+        // loose fallback. No home-only match here (live scores are cosmetic, so
+        // we'd rather show nothing than show the wrong game's score).
+        const looseHas = (set, target) => {
+          for (const k of set) { if (k === target || k.startsWith(target) || target.startsWith(k)) return true; }
+          return false;
+        };
         const game = games.find((g) => {
-          const h = (g.home || "").toLowerCase();
-          const a = (g.away || "").toLowerCase();
-          if (espnHome === h && espnAway === a) return true;
-          if (espnHome === h) return true;
-          return (
-            espnHome.startsWith(h.split(" ")[0]) &&
-            espnAway.startsWith(a.split(" ")[0])
-          );
+          const h = normalizeTeamName(g.home);
+          const a = normalizeTeamName(g.away);
+          if (ehKeys.has(h) && eaKeys.has(a)) return true;      // both exact
+          if (ehKeys.has(a) && eaKeys.has(h)) return true;      // both exact, swapped
+          if (ehKeys.has(h) && looseHas(eaKeys, a)) return true; // home exact + away loose
+          if (looseHas(ehKeys, h) && eaKeys.has(a)) return true; // away exact + home loose
+          return false;
         });
         if (!game) continue;
 
