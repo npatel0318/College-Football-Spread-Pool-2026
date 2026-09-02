@@ -2011,6 +2011,26 @@ export default function App() {
     return true;
   }
 
+  // Toggle whether a member has paid their entry fee for a given season year.
+  // Stored as leagueMeta.entryFeesPaid = { [year]: { [memberSlug]: true } }
+  async function toggleEntryFeePaid(year, memberSlug) {
+    const allPaid = { ...(leagueMeta.entryFeesPaid || {}) };
+    const yearPaid = { ...(allPaid[year] || {}) };
+    if (yearPaid[memberSlug]) delete yearPaid[memberSlug];
+    else yearPaid[memberSlug] = true;
+    allPaid[year] = yearPaid;
+    const updated = { ...leagueMeta, entryFeesPaid: allPaid };
+    // Optimistic update so the toggle feels instant
+    setLeagueMeta(updated); saveBootstrap(updated);
+    const r = await storage.set("league-meta", JSON.stringify(updated), true).catch(() => null);
+    if (!r) {
+      setError("Couldn't save payment status — try again.");
+      return false;
+    }
+    flashSaved();
+    return true;
+  }
+
   async function finalizeSeasonPayouts() {
     if (!standings || !moneyData) {
       setError("Load Standings and Money tabs first so there's data to finalize from.");
@@ -2360,6 +2380,8 @@ export default function App() {
             moneyData={moneyData}
             loading={moneyLoading}
             onRefresh={loadMoneyData}
+            commishUnlocked={commishUnlocked}
+            toggleEntryFeePaid={toggleEntryFeePaid}
           />
         )}
 
@@ -4020,10 +4042,26 @@ function CommishTab({
       }
     }
 
+    // 4. Entry fees not yet paid for the current season year
+    {
+      const feeYear = defaultWinTotalsYear();
+      const paidMap = (leagueMeta.entryFeesPaid || {})[feeYear] || {};
+      const unpaid = members.filter((m) => !paidMap[slugify(m)]);
+      if (unpaid.length > 0) {
+        alerts.push({
+          kind: "fees",
+          text: `${unpaid.length} of ${members.length} haven't paid the ${feeYear} entry fee`,
+          detail: unpaid.join(", "),
+          navigates: false,
+        });
+      }
+    }
+
     const kindStyle = {
       grade:    { color: COLORS.goldBright, icon: CheckCircle2 },
       underdog: { color: COLORS.goldBright, icon: Zap },
       missing:  { color: COLORS.chalkDim,   icon: Users },
+      fees:     { color: COLORS.goldBright, icon: DollarSign },
     };
 
     return (
@@ -4038,7 +4076,7 @@ function CommishTab({
             <CheckCircle2 size={28} style={{ color: COLORS.gold, margin: "0 auto 8px" }} />
             <div className="cfb-mono text-sm" style={{ color: COLORS.chalk }}>All caught up</div>
             <div className="text-xs mt-1" style={{ color: COLORS.muted }}>
-              No ungraded weeks, missing picks, or unmarked results.
+              No ungraded weeks, missing picks, unmarked results, or unpaid fees.
             </div>
           </div>
         ) : (
@@ -4049,19 +4087,33 @@ function CommishTab({
             {alerts.map((a, i) => {
               const st = kindStyle[a.kind] || kindStyle.grade;
               const Icon = st.icon;
-              return (
-                <button
-                  key={i}
-                  onClick={() => goMode(a.action)}
-                  className="w-full text-left px-3 py-3 flex items-start gap-3 cfb-btn"
-                  style={{ border: `1px solid ${a.soft ? COLORS.line : COLORS.lineStrong}`, background: COLORS.fieldDeep, opacity: a.soft ? 0.7 : 1 }}
-                >
+              const inner = (
+                <>
                   <Icon size={16} style={{ color: st.color, flexShrink: 0, marginTop: 1 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="text-sm" style={{ color: COLORS.chalk }}>{a.text}</div>
                     {a.detail && <div className="cfb-mono text-xs mt-0.5" style={{ color: COLORS.muted }}>{a.detail}</div>}
                   </div>
-                  <ChevronRight size={15} style={{ color: COLORS.muted, flexShrink: 0, marginTop: 1 }} />
+                  {a.navigates !== false && <ChevronRight size={15} style={{ color: COLORS.muted, flexShrink: 0, marginTop: 1 }} />}
+                </>
+              );
+              const baseStyle = { border: `1px solid ${a.soft ? COLORS.line : COLORS.lineStrong}`, background: COLORS.fieldDeep, opacity: a.soft ? 0.7 : 1 };
+              // Fee alerts are informational — the paid tracker lives on the public Money tab
+              if (a.navigates === false) {
+                return (
+                  <div key={i} className="w-full text-left px-3 py-3 flex items-start gap-3" style={baseStyle}>
+                    {inner}
+                  </div>
+                );
+              }
+              return (
+                <button
+                  key={i}
+                  onClick={() => goMode(a.action)}
+                  className="w-full text-left px-3 py-3 flex items-start gap-3 cfb-btn"
+                  style={baseStyle}
+                >
+                  {inner}
                 </button>
               );
             })}
@@ -7313,7 +7365,7 @@ function PlayoffResultsManager({ leagueMeta, playoffCache, loadPlayoff, savePlay
 
 /* ---------------------------------- money ------------------------------------ */
 
-function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
+function MoneyTab({ leagueMeta, moneyData, loading, onRefresh, commishUnlocked, toggleEntryFeePaid }) {
   if (loading && !moneyData) return <Spinner label="Tallying the money..." />;
   if (!moneyData) {
     return (
@@ -7378,6 +7430,71 @@ function MoneyTab({ leagueMeta, moneyData, loading, onRefresh }) {
         {fmtMoney(moneyData.totalWeeklyWinsPaid + moneyData.totalLockWinsPaid + moneyData.totalUnderdogWinsPaid)}. Owed back to the pot:{" "}
         {fmtMoney(moneyData.totalWeeklyLossesOwed + moneyData.totalLockLossesOwed)}.
       </div>
+
+      {(() => {
+        const feeYear = defaultWinTotalsYear();
+        const paidMap = (leagueMeta.entryFeesPaid || {})[feeYear] || {};
+        const members = leagueMeta.members || [];
+        const paidCount = members.filter((m) => paidMap[slugify(m)]).length;
+        const outstanding = members.length - paidCount;
+        const allPaid = outstanding === 0 && members.length > 0;
+        return (
+          <div style={{ border: `1px solid ${allPaid ? COLORS.gold : COLORS.line}`, background: COLORS.fieldDeep }}>
+            <div className="px-3 py-2.5 flex items-center justify-between" style={{ borderBottom: `1px solid ${COLORS.line}` }}>
+              <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.gold, letterSpacing: "0.06em" }}>
+                {feeYear} entry fees
+              </div>
+              <div className="cfb-mono text-xs" style={{ color: allPaid ? COLORS.goldBright : COLORS.chalk }}>
+                {allPaid
+                  ? "all paid ✓"
+                  : `${paidCount}/${members.length} paid · ${fmtMoney(outstanding * settings.buyIn)} out`}
+              </div>
+            </div>
+            <div>
+              {members.map((m, i) => {
+                const slug = slugify(m);
+                const isPaid = !!paidMap[slug];
+                return (
+                  <div
+                    key={m}
+                    className="px-3 py-2 flex items-center justify-between"
+                    style={{ borderTop: i === 0 ? "none" : `1px solid ${COLORS.line}` }}
+                  >
+                    <span className="text-sm" style={{ color: isPaid ? COLORS.chalk : COLORS.chalkDim }}>
+                      {m}
+                    </span>
+                    {commishUnlocked ? (
+                      <button
+                        onClick={() => toggleEntryFeePaid(feeYear, slug)}
+                        className="cfb-mono text-xs px-2.5 py-1 flex items-center gap-1.5"
+                        style={{
+                          border: `1px solid ${isPaid ? COLORS.gold : COLORS.lineStrong}`,
+                          background: isPaid ? "rgba(217,164,65,0.12)" : "transparent",
+                          color: isPaid ? COLORS.goldBright : COLORS.muted,
+                        }}
+                      >
+                        {isPaid ? <><CheckCircle2 size={12} /> paid</> : "mark paid"}
+                      </button>
+                    ) : (
+                      <span
+                        className="cfb-mono text-xs px-2 py-0.5 flex items-center gap-1"
+                        style={{ color: isPaid ? COLORS.goldBright : COLORS.muted }}
+                      >
+                        {isPaid ? <><CheckCircle2 size={12} /> paid</> : "unpaid"}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {!commishUnlocked && (
+              <div className="px-3 py-2 text-xs" style={{ color: COLORS.muted, borderTop: `1px solid ${COLORS.line}` }}>
+                Only the commissioner can mark fees as paid.
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div className="overflow-x-auto cfb-scroll" style={{ border: `1px solid ${COLORS.line}` }}>
         <table className="cfb-mono text-sm w-full" style={{ borderCollapse: "collapse" }}>
