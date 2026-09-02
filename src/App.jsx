@@ -888,7 +888,26 @@ export default function App() {
     };
   }, [phase, selectedWeek, activeTab]);
 
+  // Server-truth-ish guard: re-check the game's kickoff at save time so a stale
+  // client (tab left open past kickoff) can't sneak in a late pick. The UI already
+  // disables locked games; this is the backstop for the edge case.
+  function isGameLockedNow(weekNum, gameId) {
+    const wk = weekCache[weekNum];
+    if (!wk) return false;
+    if (wk.locked) return true; // whole week manually locked
+    const game = (wk.games || []).find((g) => g.id === gameId);
+    if (!game || !game.kickoffISO) return false;
+    const kickoffMs = new Date(game.kickoffISO).getTime();
+    if (isNaN(kickoffMs)) return false;
+    return Date.now() >= kickoffMs;
+  }
+
   async function savePick(weekNum, gameId, side) {
+    // Guard: reject picks on games that have already kicked off
+    if (isGameLockedNow(weekNum, gameId)) {
+      setError("That game has already kicked off — picks for it are locked.");
+      return;
+    }
     setSavingGameId(gameId);
     const mySlug = slugify(myName);
     const existing = picksCache[weekNum]?.[mySlug] || {};
@@ -923,6 +942,11 @@ export default function App() {
   }
 
   async function toggleMyLock(weekNum, gameId) {
+    // Guard: can't change your lock on a game that's already kicked off
+    if (isGameLockedNow(weekNum, gameId)) {
+      setError("That game has already kicked off — you can't change your lock on it.");
+      return;
+    }
     const mySlug = slugify(myName);
     const existing = picksCache[weekNum]?.[mySlug] || {};
     if (!existing.picks || !existing.picks[gameId]) return; // can't lock a game you haven't picked
@@ -943,6 +967,13 @@ export default function App() {
   }
 
   async function saveUnderdogPick(weekNum, underdogPick) {
+    // Guard: once the commissioner locks the week, underdog picks are frozen.
+    // (Underdog can be any FBS game with no stored kickoff, so we can't do a
+    // per-game kickoff check here — the week lock is the enforceable boundary.)
+    if (weekCache[weekNum]?.locked) {
+      setError("This week is locked — underdog picks can no longer be changed.");
+      return false;
+    }
     const mySlug = slugify(myName);
     const existing = picksCache[weekNum]?.[mySlug] || {};
     const payload = { ...existing, name: myName, underdogPick, underdogResult: null, submittedAt: Date.now() };
