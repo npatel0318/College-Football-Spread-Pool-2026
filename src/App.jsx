@@ -1268,12 +1268,37 @@ export default function App() {
       }
     }
 
+    // Save scores for every matched game that's already FINAL, even if other
+    // games are still in progress. This lets "This week" reflect finished games
+    // as they complete instead of waiting for the slowest game of the week.
+    // The week is only marked `graded` (which gates money finalization) once
+    // ALL games are matched and final — that happens further down.
+    const finalMatched = matched.filter((m) => m.espn.completed);
     const notFinal = matched.filter((m) => !m.espn.completed);
+
+    // Progressive save: write scores for finished games now. Games still in
+    // progress or unmatched keep their existing (null) score.
+    const applyFinalScores = (games) =>
+      games.map((game) => {
+        const m = finalMatched.find((x) => x.game.id === game.id);
+        return m ? { ...game, homeScore: m.espn.homeScore, awayScore: m.espn.awayScore } : game;
+      });
+
     if (notFinal.length > 0) {
+      // Some games still live — persist the finished ones, then report pending.
+      // Only write if there's something new to avoid needless saves.
+      const anyNewScores = finalMatched.some((m) => {
+        const g = week.games.find((x) => x.id === m.game.id);
+        return g && (g.homeScore == null || g.awayScore == null);
+      });
+      if (anyNewScores) {
+        const progressiveGames = applyFinalScores(week.games);
+        await saveResults(weekNum, progressiveGames); // graded stays false (not all scored)
+      }
       return {
         status: "pending",
-        message: `${notFinal.length} game${notFinal.length === 1 ? "" : "s"} still in progress — check back once all games are final.`,
-        completedCount: matched.length - notFinal.length,
+        message: `${notFinal.length} game${notFinal.length === 1 ? "" : "s"} still in progress — finished games are scored; check back once all are final.`,
+        completedCount: finalMatched.length,
         totalCount: week.games.length,
       };
     }
@@ -1283,10 +1308,7 @@ export default function App() {
     // scores and the commissioner only needs to enter the unmatched ones.
     // graded stays false until all scores are present.
     if (unmatched.length > 0) {
-      const partialGames = week.games.map((game) => {
-        const m = matched.find((x) => x.game.id === game.id);
-        return m ? { ...game, homeScore: m.espn.homeScore, awayScore: m.espn.awayScore } : game;
-      });
+      const partialGames = applyFinalScores(week.games);
       await saveResults(weekNum, partialGames);
       const names = unmatched.map((g) => `${g.away} @ ${g.home}`).join(", ");
       return {
@@ -1297,10 +1319,7 @@ export default function App() {
     }
 
     // All matched and final — save and mark graded
-    const gamesWithScores = week.games.map((game) => {
-      const m = matched.find((x) => x.game.id === game.id);
-      return m ? { ...game, homeScore: m.espn.homeScore, awayScore: m.espn.awayScore } : game;
-    });
+    const gamesWithScores = applyFinalScores(week.games);
     const ok = await saveResults(weekNum, gamesWithScores);
     if (!ok) return { status: "error", message: "Scores fetched but couldn't save — try again." };
     return { status: "graded", message: `Week ${weekNum} auto-graded: all ${week.games.length} games matched and saved.` };
