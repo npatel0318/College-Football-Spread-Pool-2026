@@ -1245,7 +1245,10 @@ export default function App() {
   async function autoGradeWeek(weekNum) {
     const week = weekCache[weekNum];
     if (!week) return { status: "error", message: "Week data not loaded." };
-    if (!week.locked) return { status: "not-locked" };
+    // NOTE: we intentionally do NOT require week.locked here. This pool locks
+    // picks per-game at kickoff, so a week is never manually "locked". Grading
+    // is gated on individual game finality instead (checked below via ESPN's
+    // completed flag), which is the correct boundary for per-game locking.
     if (week.graded) return { status: "already-graded" };
     if (!week.weekDates?.from || !week.weekDates?.to) {
       return { status: "no-dates", message: "No game dates stored for this week. Set dates in the Games tab and re-save." };
@@ -2219,10 +2222,12 @@ export default function App() {
     const now = Date.now();
     if (now - lastCheckTimeRef.current < COOLDOWN_MS) return;
 
-    // Find weeks that are locked, ungraded, and already in the cache
+    // Find weeks that are ungraded and cached. We do NOT require week.locked —
+    // this pool locks games individually at kickoff, so grading is driven by
+    // per-game finality (handled inside autoGradeWeek), not a week-level lock.
     const weeksToGrade = leagueMeta.weeks.filter((w) => {
       const c = weekCache[w];
-      return c && c.locked && !c.graded;
+      return c && !c.graded;
     });
     if (!weeksToGrade.length) return;
 
@@ -5677,9 +5682,29 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
     }
   }, [week?.weekNum, week?.graded]);
 
-  // Auto-grade: fires when a locked, ungraded week loads
+  // Manual grade trigger — always re-runs, reloading the week from Firestore
+  // first so we grade against the freshest games/dates. Surfaces the raw status
+  // so the commissioner can see exactly what happened (not-locked, no-dates,
+  // pending, partial, graded, error).
+  async function runGrade() {
+    if (selectedWeek == null) return;
+    setAutoRunning(true);
+    setAutoStatus({ status: "running", message: "Reloading week and fetching scores from ESPN..." });
+    await loadWeek(selectedWeek, true); // refresh week data first
+    const result = await autoGradeWeek(selectedWeek);
+    // Surface not-locked explicitly so it isn't a silent no-op
+    if (result?.status === "not-locked") {
+      setAutoStatus({ status: "not-locked", message: "This week isn't locked yet — lock it in Manage games, then grade." });
+    } else {
+      setAutoStatus(result);
+    }
+    setAutoRunning(false);
+  }
+
+  // Auto-grade: fires when an ungraded week loads (no week-lock required —
+  // grading is driven by per-game finality since games lock individually).
   useEffect(() => {
-    if (!week || !week.locked || week.graded || autoRunning || autoStatus) return;
+    if (!week || week.graded || autoRunning || autoStatus) return;
     (async () => {
       setAutoRunning(true);
       setAutoStatus({ status: "running", message: "Fetching scores from ESPN..." });
@@ -5687,7 +5712,7 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
       setAutoStatus(result);
       setAutoRunning(false);
     })();
-  }, [week?.weekNum, week?.locked, week?.graded]);
+  }, [week?.weekNum, week?.graded]);
 
   useEffect(() => {
     const init = {};
@@ -5725,6 +5750,17 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
 
       {week && (
         <>
+          {/* Always-available manual grade trigger */}
+          <button
+            onClick={runGrade}
+            disabled={autoRunning}
+            className="cfb-mono cfb-btn text-xs px-3 py-2 flex items-center gap-1.5"
+            style={{ border: `1px solid ${COLORS.lineStrong}`, color: COLORS.goldBright }}
+          >
+            <RefreshCw size={12} className={autoRunning ? "animate-spin" : ""} />
+            {autoRunning ? "Grading…" : "Grade now (fetch scores from ESPN)"}
+          </button>
+
           {/* Auto-grade status */}
           {autoStatus?.status === "running" && (
             <div className="px-3 py-2 flex items-center gap-2 text-sm" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}`, color: COLORS.chalkDim }}>
@@ -5736,7 +5772,7 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
             <div className="px-3 py-2 flex items-center gap-2 text-sm" style={{ background: "rgba(217,164,65,0.1)", border: `1px solid ${COLORS.gold}`, color: COLORS.goldBright }}>
               <CheckCircle2 size={14} className="flex-shrink-0" />
               {autoStatus.message}
-              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs ml-auto opacity-60 hover:opacity-100">re-fetch</button>
+              <button onClick={runGrade} className="cfb-mono text-xs ml-auto opacity-60 hover:opacity-100">re-fetch</button>
             </div>
           )}
           {autoStatus?.status === "pending" && (
@@ -5747,29 +5783,34 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
               <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
                 {autoStatus.completedCount} of {autoStatus.totalCount} games final so far.
               </div>
-              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>check again</button>
+              <button onClick={runGrade} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>check again</button>
             </div>
           )}
           {autoStatus?.status === "partial" && (
             <div className="px-3 py-2 space-y-1" style={{ background: "rgba(179,55,42,0.1)", border: `1px solid ${COLORS.red}` }}>
               <div className="text-sm" style={{ color: COLORS.redBright }}>{autoStatus.message}</div>
-              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>try again</button>
+              <button onClick={runGrade} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>try again</button>
             </div>
           )}
           {autoStatus?.status === "error" && (
             <div className="px-3 py-2 space-y-1" style={{ background: "rgba(179,55,42,0.1)", border: `1px solid ${COLORS.red}` }}>
               <div className="text-sm" style={{ color: COLORS.redBright }}>{autoStatus.message}</div>
-              <button onClick={() => { setAutoStatus(null); }} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>retry</button>
+              <button onClick={runGrade} className="cfb-mono text-xs" style={{ color: COLORS.gold }}>retry</button>
             </div>
           )}
           {autoStatus?.status === "no-dates" && (
-            <div className="px-3 py-2 text-sm" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalkDim }}>
+            <div className="px-3 py-2 text-sm" style={{ background: "rgba(179,55,42,0.1)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}>
+              {autoStatus.message}
+            </div>
+          )}
+          {autoStatus?.status === "not-locked" && (
+            <div className="px-3 py-2 text-sm" style={{ background: "rgba(179,55,42,0.1)", border: `1px solid ${COLORS.red}`, color: COLORS.redBright }}>
               {autoStatus.message}
             </div>
           )}
           {!week.locked && (
-            <div className="px-3 py-2 text-sm" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}`, color: COLORS.chalkDim }}>
-              Lock the week first — results can only be entered once picks are locked.
+            <div className="px-3 py-2 text-xs" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}`, color: COLORS.muted }}>
+              Games grade automatically as each one goes final on ESPN — no need to lock the week.
             </div>
           )}
           {week.graded && !autoStatus && (
