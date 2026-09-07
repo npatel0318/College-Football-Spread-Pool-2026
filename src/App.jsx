@@ -2802,8 +2802,8 @@ function LiveScorePanel({ game, data }) {
     isRedZone, possession,
   } = data;
 
-  const awayAbbr = teamAbbrev(game.away);
-  const homeAbbr = teamAbbrev(game.home);
+  const awayAbbr = game.awayAbbr || teamAbbrev(game.away);
+  const homeAbbr = game.homeAbbr || teamAbbrev(game.home);
 
   const periodLabel =
     period > 4
@@ -3352,7 +3352,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       {saving && "saving..."}
                       {week.graded && g.homeScore != null && (
                         <>
-                          final: {g.away} {g.awayScore} – {g.home} {g.homeScore}
+                          final: {g.awayAbbr || teamAbbrev(g.away)} {g.awayScore} – {g.homeAbbr || teamAbbrev(g.home)} {g.homeScore}
                           {cover === "push" && "  (push)"}
                         </>
                       )}
