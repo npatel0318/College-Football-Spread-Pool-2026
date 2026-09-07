@@ -942,13 +942,23 @@ export default function App() {
   }
 
   async function toggleMyLock(weekNum, gameId) {
-    // Guard: can't change your lock on a game that's already kicked off
-    if (isGameLockedNow(weekNum, gameId)) {
-      setError("That game has already kicked off — you can't change your lock on it.");
-      return;
-    }
     const mySlug = slugify(myName);
     const existing = picksCache[weekNum]?.[mySlug] || {};
+
+    // Guard 1: once your CURRENT lock game has kicked off, your lock is committed —
+    // you can't move it to another game or remove it. (Prevents switching your
+    // bonus pick after seeing how your locked game is playing out.)
+    if (existing.lockedGameId && isGameLockedNow(weekNum, existing.lockedGameId)) {
+      setError("Your locked game has already kicked off — your lock of the week is now final and can't be changed.");
+      return;
+    }
+
+    // Guard 2: can't newly lock a game that itself has already kicked off.
+    if (isGameLockedNow(weekNum, gameId)) {
+      setError("That game has already kicked off — you can't make it your lock.");
+      return;
+    }
+
     if (!existing.picks || !existing.picks[gameId]) return; // can't lock a game you haven't picked
     const nextLockedGameId = existing.lockedGameId === gameId ? null : gameId;
     const payload = { ...existing, name: myName, lockedGameId: nextLockedGameId, submittedAt: Date.now() };
@@ -2984,6 +2994,15 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   const mySlug = slugify(myName);
   const myPicks = picksCache[selectedWeek]?.[mySlug]?.picks || {};
   const myLockedGameId = picksCache[selectedWeek]?.[mySlug]?.lockedGameId || null;
+  // Once the user's committed lock game has kicked off, the lock is final —
+  // they can't move it to another game. Used to disable all lock buttons.
+  const myLockFrozen = (() => {
+    if (!myLockedGameId) return false;
+    const lockedGame = (week.games || []).find((g) => g.id === myLockedGameId);
+    if (!lockedGame?.kickoffISO) return false;
+    const t = new Date(lockedGame.kickoffISO).getTime();
+    return !isNaN(t) && Date.now() >= t;
+  })();
   const myUnderdogPick = picksCache[selectedWeek]?.[mySlug]?.underdogPick || null;
   const myUnderdogResult = picksCache[selectedWeek]?.[mySlug]?.underdogResult ?? null;
   const allEntries = Object.entries(picksCache[selectedWeek] || {});
@@ -3305,21 +3324,26 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       lockColor = COLORS.redBright;
                       lockBorder = COLORS.red;
                     }
+                    // Lock is frozen once your committed lock game kicks off:
+                    // no other game can become your lock.
+                    const lockBtnDisabled = disabled || (myLockFrozen && !isMyLock);
                     return (
                       <button
-                        disabled={disabled}
+                        disabled={lockBtnDisabled}
                         onClick={() => toggleMyLock(selectedWeek, g.id)}
                         className="cfb-btn flex items-center gap-1.5 mt-2 px-2 py-1.5 text-xs cfb-mono uppercase tracking-wide"
                         style={{
                           background: isMyLock ? "rgba(217,164,65,0.12)" : "transparent",
                           border: `1px solid ${lockBorder}`,
                           color: lockColor,
-                          cursor: disabled ? "default" : "pointer",
-                          opacity: disabled && !isMyLock ? 0.5 : 1,
+                          cursor: lockBtnDisabled ? "default" : "pointer",
+                          opacity: lockBtnDisabled && !isMyLock ? 0.5 : 1,
                         }}
                       >
                         <Flame size={12} />
-                        {isMyLock ? (lockGraded ? (lockWon ? "Lock won" : lockLost ? "Lock lost" : "Your lock") : "Your lock") : "Make this your lock"}
+                        {isMyLock
+                          ? (lockGraded ? (lockWon ? "Lock won" : lockLost ? "Lock lost" : "Your lock") : "Your lock")
+                          : (myLockFrozen ? "Lock is set" : "Make this your lock")}
                       </button>
                     );
                   })()}
