@@ -2828,6 +2828,24 @@ function LiveScorePanel({ game, data }) {
   const awayLeads = !isNaN(awayNum) && !isNaN(homeNum) && awayNum > homeNum;
   const homeLeads = !isNaN(homeNum) && !isNaN(awayNum) && homeNum > awayNum;
 
+  // Live "who's covering" — computed from the CURRENT score against the spread.
+  // Only meaningful while in progress; objective (which team is covering), neutral
+  // color, no win/loss commitment until the game is final.
+  let coveringText = null;
+  if (inProgress && !isNaN(awayNum) && !isNaN(homeNum) && game.spread != null && game.favorite) {
+    const favScore = game.favorite === "home" ? homeNum : awayNum;
+    const dogScore = game.favorite === "home" ? awayNum : homeNum;
+    const margin = favScore - dogScore;
+    const spread = Number(game.spread);
+    if (margin === spread) {
+      coveringText = "even with the spread";
+    } else {
+      const covSide = margin > spread ? game.favorite : (game.favorite === "home" ? "away" : "home");
+      const covAbbr = covSide === "home" ? homeAbbr : awayAbbr;
+      coveringText = `${covAbbr} covering`;
+    }
+  }
+
   return (
     <div
       style={{
@@ -2855,7 +2873,10 @@ function LiveScorePanel({ game, data }) {
           )}
           {completed ? "FINAL" : inProgress ? "LIVE" : ""}
         </span>
-        <span style={{ color: COLORS.chalkDim }}>{clockLine}</span>
+        <span style={{ color: COLORS.chalkDim }}>
+          {coveringText && <span style={{ color: COLORS.muted, marginRight: 8 }}>{coveringText}</span>}
+          {clockLine}
+        </span>
       </div>
 
       {/* Scores */}
@@ -3008,6 +3029,23 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
   const allEntries = Object.entries(picksCache[selectedWeek] || {});
   const submittedCount = allEntries.filter(([, v]) => v && Object.keys(v.picks || {}).length > 0).length;
 
+  // Live running record — counts finished games only, updates as each game
+  // completes (not gated on full-week grading).
+  const myRecord = (() => {
+    let wins = 0, losses = 0, pushes = 0, pending = 0;
+    for (const g of week.games) {
+      const myPick = myPicks[g.id];
+      if (!myPick) { pending += 1; continue; } // no pick counts as pending here
+      const cover = coveringSide(g); // null until the game has a score
+      if (!cover) { pending += 1; continue; }
+      if (cover === "push") pushes += 1;
+      else if (myPick === cover) wins += 1;
+      else losses += 1;
+    }
+    return { wins, losses, pushes, pending };
+  })();
+  const myPickedCount = Object.keys(myPicks).length;
+
   const myCorrect = week.graded
     ? week.games.reduce((acc, g) => {
         const cover = coveringSide(g);
@@ -3084,6 +3122,24 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
 
       {viewMode === "mine" && (
         <>
+      {/* Live running record — updates as each game finishes */}
+      {myPickedCount > 0 && (myRecord.wins + myRecord.losses + myRecord.pushes) > 0 && !week.graded && (
+        <div
+          className="px-3 py-2 flex items-center gap-2 cfb-mono text-sm"
+          style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.lineStrong}` }}
+        >
+          <span style={{ color: COLORS.goldBright, fontWeight: 700 }}>
+            {myRecord.wins}-{myRecord.losses}{myRecord.pushes > 0 ? `-${myRecord.pushes}` : ""}
+          </span>
+          <span style={{ color: COLORS.muted }}>so far</span>
+          {myRecord.pending > 0 && (
+            <span style={{ color: COLORS.muted, marginLeft: "auto" }}>
+              {myRecord.pending} pending
+            </span>
+          )}
+        </div>
+      )}
+
       {week.graded && (
         <div
           className="px-3 py-2 flex items-center gap-2"
@@ -3350,15 +3406,19 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                   <div className="flex items-center justify-between mt-1.5">
                     <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
                       {saving && "saving..."}
-                      {week.graded && g.homeScore != null && (
+                      {g.homeScore != null && g.awayScore != null && (
                         <>
                           final: {g.awayAbbr || teamAbbrev(g.away)} {g.awayScore} – {g.homeAbbr || teamAbbrev(g.home)} {g.homeScore}
                           {cover === "push" && "  (push)"}
                         </>
                       )}
                     </div>
-                    {week.graded && cover === "push" && <MinusCircle size={14} style={{ color: COLORS.muted }} />}
-                    {week.graded && isCorrectIcon(cover, myPick)}
+                    {/* Per-game result indicator: shows as soon as THIS game is final,
+                        regardless of whether the whole week is graded. */}
+                    {g.homeScore != null && g.awayScore != null && cover === "push" && (
+                      <MinusCircle size={14} style={{ color: COLORS.muted }} />
+                    )}
+                    {g.homeScore != null && g.awayScore != null && cover !== "push" && isCorrectIcon(cover, myPick)}
                   </div>
                 </div>
               </div>
