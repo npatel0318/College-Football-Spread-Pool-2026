@@ -2875,7 +2875,7 @@ function LiveScorePanel({ game, data }) {
         </span>
         <span style={{ color: COLORS.chalkDim }}>
           {coveringText && <span style={{ color: COLORS.muted, marginRight: 8 }}>{coveringText}</span>}
-          {clockLine}
+          {!completed && clockLine}
         </span>
       </div>
 
@@ -3250,13 +3250,19 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                     <LiveScorePanel game={g} data={liveScores[g.id]} />
                   )}
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-2" style={{ marginTop: 6, overflow: "visible" }}>
                     {["away", "home"].map((side) => {
                       const lbl = side === "home" ? homeL : awayL;
                       const isPicked = myPick === side;
                       const isOtherPicked = myPick && myPick !== side;
                       const isCorrect = week.graded && cover === side && cover !== "push";
                       const isWrong = week.graded && isPicked && cover !== side && cover !== "push";
+                      // Progressive result: does THIS game have a final score yet?
+                      // Drives the WON/LOST badge on the picked box (independent of
+                      // whole-week grading, which still gates the box coloring).
+                      const gameFinal = g.homeScore != null && g.awayScore != null && cover != null;
+                      const showBadge = gameFinal && isPicked && cover !== "push";
+                      const pickWon = showBadge && myPick === cover;
                       const teamColor = side === "home" ? g.homeColor : g.awayColor;
                       const teamLogo = side === "home" ? g.homeLogo : g.awayLogo;
 
@@ -3298,6 +3304,36 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                             minHeight: 90,
                           }}
                         >
+                          {/* Floating WON / LOST badge — overlaps the top edge of
+                              the picked team's box. Green for won, red for lost.
+                              Appears as soon as this game is final. */}
+                          {showBadge && (
+                            <span
+                              className="cfb-mono"
+                              style={{
+                                position: "absolute",
+                                top: -10,
+                                left: "50%",
+                                transform: "translateX(-50%)",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 3,
+                                padding: "2px 8px",
+                                borderRadius: 10,
+                                fontSize: "0.62rem",
+                                fontWeight: 700,
+                                letterSpacing: "0.06em",
+                                whiteSpace: "nowrap",
+                                zIndex: 3,
+                                color: "#0c0c0e",
+                                background: pickWon ? "#3fae5a" : "#d1483f",
+                                boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+                              }}
+                            >
+                              {pickWon ? <CheckCircle2 size={11} strokeWidth={3} /> : <XCircle size={11} strokeWidth={3} />}
+                              {pickWon ? "WON" : "LOST"}
+                            </span>
+                          )}
                           {/* AWAY / HOME chip — hidden for neutral-site games */}
                           {!g.neutral && (
                             <span
@@ -3403,23 +3439,19 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       </button>
                     );
                   })()}
-                  <div className="flex items-center justify-between mt-1.5">
-                    <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
-                      {saving && "saving..."}
-                      {g.homeScore != null && g.awayScore != null && (
-                        <>
-                          final: {g.awayAbbr || teamAbbrev(g.away)} {g.awayScore} – {g.homeAbbr || teamAbbrev(g.home)} {g.homeScore}
-                          {cover === "push" && "  (push)"}
-                        </>
+                  {(saving || (g.homeScore != null && g.awayScore != null && cover === "push")) && (
+                    <div className="flex items-center justify-between mt-1.5">
+                      <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                        {saving && "saving..."}
+                      </div>
+                      {/* Push has no picked-team box to badge, so show a neutral push tag here */}
+                      {g.homeScore != null && g.awayScore != null && cover === "push" && (
+                        <span className="cfb-mono text-xs flex items-center gap-1" style={{ color: COLORS.muted }}>
+                          <MinusCircle size={13} /> push
+                        </span>
                       )}
                     </div>
-                    {/* Per-game result indicator: shows as soon as THIS game is final,
-                        regardless of whether the whole week is graded. */}
-                    {g.homeScore != null && g.awayScore != null && cover === "push" && (
-                      <MinusCircle size={14} style={{ color: COLORS.muted }} />
-                    )}
-                    {g.homeScore != null && g.awayScore != null && cover !== "push" && isCorrectIcon(cover, myPick)}
-                  </div>
+                  )}
                 </div>
               </div>
             );
