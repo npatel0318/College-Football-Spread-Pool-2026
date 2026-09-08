@@ -3066,6 +3066,27 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
     return () => { stale = true; clearInterval(liveTimerRef.current); };
   }, [selectedWeek, lockedCount, week?.graded]); // eslint-disable-line
 
+  // Live tracking for the current user's own underdog game. Polls ESPN for the
+  // matched game so we can (a) show its live/final score and (b) lock the field
+  // once it kicks off. Runs whenever the user has an underdog pick this week.
+  const [udLive, setUdLive] = useState(null);
+  const udLiveTimerRef = useRef(null);
+  const myUdPickForLive = picksCache[selectedWeek]?.[slugify(myName)]?.underdogPick || null;
+  useEffect(() => {
+    if (udLiveTimerRef.current) clearInterval(udLiveTimerRef.current);
+    setUdLive(null);
+    if (!myUdPickForLive || !week) return;
+    let stale = false;
+    async function refresh() {
+      const data = await fetchUnderdogLive(myUdPickForLive, week.weekDates).catch(() => null);
+      if (!stale) setUdLive(data);
+    }
+    refresh();
+    // Poll every 30s while live; the fetch is cheap and self-limiting.
+    udLiveTimerRef.current = setInterval(refresh, 30_000);
+    return () => { stale = true; clearInterval(udLiveTimerRef.current); };
+  }, [selectedWeek, myUdPickForLive?.team, myUdPickForLive?.opponent]); // eslint-disable-line
+
   // --- early returns after all hooks ---
 
   if (selectedWeek == null) {
@@ -3534,7 +3555,9 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
 
       <UnderdogOfWeekCard
         weekNum={selectedWeek}
-        locked={week.locked}
+        locked={week.locked || (udLive?.started === true)}
+        kickedOff={udLive?.started === true}
+        live={udLive}
         existingPick={myUnderdogPick}
         existingResult={myUnderdogResult}
         saveUnderdogPick={saveUnderdogPick}
@@ -3551,7 +3574,7 @@ function isCorrectIcon(cover, myPick) {
   return <XCircle size={14} style={{ color: COLORS.redBright }} />;
 }
 
-function UnderdogOfWeekCard({ weekNum, locked, existingPick, existingResult, saveUnderdogPick }) {
+function UnderdogOfWeekCard({ weekNum, locked, kickedOff, live, existingPick, existingResult, saveUnderdogPick }) {
   const [team, setTeam] = useState(existingPick?.team || "");
   const [opponent, setOpponent] = useState(existingPick?.opponent || "");
   const [spread, setSpread] = useState(existingPick?.spread != null ? String(existingPick.spread) : "");
@@ -3570,6 +3593,43 @@ function UnderdogOfWeekCard({ weekNum, locked, existingPick, existingResult, sav
   let resultColor = COLORS.chalkDim;
   if (existingResult === true) resultColor = COLORS.goldBright;
   else if (existingResult === false) resultColor = COLORS.redBright;
+
+  // Live/final score panel for the underdog's game
+  const livePanel = existingPick && live && (live.inProgress || live.completed) ? (() => {
+    const dogWinning = live.dogScore !== "—" && live.oppScore !== "—" && Number(live.dogScore) > Number(live.oppScore);
+    const periodLabel = live.completed
+      ? "FINAL"
+      : live.period > 4
+      ? (live.period === 5 ? "OT" : `${live.period - 4}OT`)
+      : live.period === 1 ? "1ST" : live.period === 2 ? "2ND" : live.period === 3 ? "3RD" : live.period === 4 ? "4TH" : "";
+    return (
+      <div className="mt-2 px-2.5 py-2" style={{ border: `1px solid ${COLORS.lineStrong}`, background: COLORS.fieldDark }}>
+        <div className="flex items-center justify-between cfb-mono" style={{ fontSize: "0.62rem", letterSpacing: "0.06em", marginBottom: 6 }}>
+          <span className="flex items-center gap-1.5" style={{ color: live.inProgress ? "#e05050" : COLORS.chalkDim, fontWeight: 700 }}>
+            {live.inProgress && <span className="animate-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: "#e05050", display: "inline-block" }} />}
+            {live.completed ? "FINAL" : "LIVE"}
+          </span>
+          <span style={{ color: COLORS.chalkDim }}>
+            {!live.completed && `${periodLabel} ${live.clock}`.trim()}
+          </span>
+        </div>
+        <div className="flex items-center justify-between cfb-mono text-sm">
+          <span style={{ color: (live.underdogSide && dogWinning) ? COLORS.goldBright : COLORS.chalk, fontWeight: 700 }}>
+            {live.dogAbbr} {live.dogScore}
+          </span>
+          <span style={{ color: COLORS.muted }}>–</span>
+          <span style={{ color: (!dogWinning && live.oppScore !== "—" && Number(live.oppScore) > Number(live.dogScore)) ? COLORS.chalk : COLORS.chalkDim, fontWeight: 700 }}>
+            {live.oppScore} {live.oppAbbr}
+          </span>
+        </div>
+        {live.completed && (
+          <div className="cfb-mono text-xs mt-1.5 text-center" style={{ color: dogWinning ? COLORS.goldBright : COLORS.redBright }}>
+            {dogWinning ? `${live.dogAbbr} won outright — hit!` : `${live.dogAbbr} didn't win — missed`}
+          </div>
+        )}
+      </div>
+    );
+  })() : null;
 
   return (
     <div className="px-3 py-3" style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}>
@@ -3622,14 +3682,20 @@ function UnderdogOfWeekCard({ weekNum, locked, existingPick, existingResult, sav
           Needs a team, an opponent, and a spread of at least +14.
         </div>
       )}
+      {kickedOff && existingPick && (
+        <div className="cfb-mono text-xs mt-2 flex items-center gap-1.5" style={{ color: COLORS.muted }}>
+          <Lock size={11} /> your underdog game has kicked off — pick is locked
+        </div>
+      )}
       {existingPick && (
         <div className="cfb-mono text-xs mt-2" style={{ color: resultColor }}>
           {existingPick.team} +{existingPick.spread} vs {existingPick.opponent}
           {existingResult === true && " — hit!"}
           {existingResult === false && " — missed"}
-          {existingResult == null && locked && " — pending"}
+          {existingResult == null && locked && !kickedOff && " — pending"}
         </div>
       )}
+      {livePanel}
     </div>
   );
 }
@@ -4742,6 +4808,93 @@ function teamAbbrev(name) {
 // Fetch live ESPN game data (score, clock, down/distance, possession) for all
 // games in a week. Returns a map of { [game.id]: liveData }. Non-fatal — any
 // game that doesn't match ESPN is simply absent from the result.
+// Fetches live/final data for a single free-text underdog pick's game.
+// Searches the full FBS scoreboard across the week's dates, matches the game
+// using the same team+opponent logic as scoring, and returns rich live data
+// (score, period, clock, possession) PLUS the kickoff ISO and which side the
+// underdog is on. Returns null if no confident match. Used both to display the
+// live/final score and to lock the pick field once the game kicks off.
+async function fetchUnderdogLive(pick, weekDates) {
+  if (!pick?.team) return null;
+  const t = normalizeTeamName(pick.team);
+  const o = normalizeTeamName(pick.opponent);
+  if (!t) return null;
+
+  let dates = [];
+  if (weekDates?.from && weekDates?.to) {
+    dates = getDatesInRange(weekDates.from, weekDates.to);
+  } else {
+    dates = [new Date().toISOString().slice(0, 10).replace(/-/g, "")];
+  }
+
+  const looseHas = (set, target) => {
+    for (const k of set) { if (k === target || k.startsWith(target) || target.startsWith(k)) return true; }
+    return false;
+  };
+
+  for (const yyyymmdd of dates) {
+    try {
+      const res = await fetch(
+        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?groups=80&dates=${yyyymmdd}&limit=400`
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+
+      for (const event of data.events || []) {
+        const comp = event.competitions?.[0];
+        if (!comp) continue;
+        const homeComp = comp.competitors?.find((c) => c.homeAway === "home");
+        const awayComp = comp.competitors?.find((c) => c.homeAway === "away");
+        if (!homeComp || !awayComp) continue;
+
+        const ehKeys = new Set([homeComp.team?.displayName, homeComp.team?.location, homeComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
+        const eaKeys = new Set([awayComp.team?.displayName, awayComp.team?.location, awayComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
+
+        // Determine if this is the underdog's game and which side the dog is on.
+        // Prefer a both-teams match (green); fall back to team-only.
+        let underdogSide = null;
+        if (ehKeys.has(t) && o && eaKeys.has(o)) underdogSide = "home";
+        else if (eaKeys.has(t) && o && ehKeys.has(o)) underdogSide = "away";
+        else if (ehKeys.has(t)) underdogSide = "home";
+        else if (eaKeys.has(t)) underdogSide = "away";
+        else if (looseHas(ehKeys, t)) underdogSide = "home";
+        else if (looseHas(eaKeys, t)) underdogSide = "away";
+        if (!underdogSide) continue;
+
+        const status = comp.status;
+        const sit = comp.situation;
+        const possId = sit?.possession;
+        const period = status.period || 0;
+        const completed = status.type?.completed === true;
+
+        const dogComp = underdogSide === "home" ? homeComp : awayComp;
+        const oppComp = underdogSide === "home" ? awayComp : homeComp;
+
+        return {
+          kickoffISO: comp.date || event.date || null,
+          started: (status.type?.state === "in" || status.type?.state === "post") || period > 0,
+          underdogSide,
+          dogAbbr: dogComp.team?.abbreviation || dogComp.team?.shortDisplayName || pick.team,
+          oppAbbr: oppComp.team?.abbreviation || oppComp.team?.shortDisplayName || pick.opponent,
+          dogName: dogComp.team?.shortDisplayName || dogComp.team?.location || pick.team,
+          oppName: oppComp.team?.shortDisplayName || oppComp.team?.location || pick.opponent,
+          dogScore: dogComp.score ?? "—",
+          oppScore: oppComp.score ?? "—",
+          dogLogo: dogComp.team?.logo || null,
+          oppLogo: oppComp.team?.logo || null,
+          completed,
+          inProgress: !completed && period > 0,
+          period,
+          clock: status.displayClock || "",
+          shortDetail: status.type?.shortDetail || "",
+          possession: possId === dogComp.id ? "dog" : possId === oppComp.id ? "opp" : null,
+        };
+      }
+    } catch (_) { /* non-fatal */ }
+  }
+  return null;
+}
+
 async function fetchLiveGameDetails(week) {
   const games = week?.games || [];
   if (!games.length) return {};
