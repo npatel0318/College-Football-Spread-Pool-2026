@@ -1007,7 +1007,8 @@ export default function App() {
     for (const [slug, result] of Object.entries(resultsBySlug)) {
       const existing = weekPicks[slug];
       if (!existing) continue;
-      const payload = { ...existing, underdogResult: result };
+      // Manual result — flag it so the auto-scorer never overwrites a human call.
+      const payload = { ...existing, underdogResult: result, underdogResultManual: true };
       const r = await storage.set(`week:${weekNum}:picks:${slug}`, JSON.stringify(payload), true).catch(() => null);
       if (r) updates[slug] = payload;
     }
@@ -1250,6 +1251,77 @@ export default function App() {
     }
 
     return null;
+  }
+
+  // Match a free-text underdog pick { team, opponent, spread } to an ESPN game.
+  // Uses BOTH the team and opponent the user typed, which sharply reduces the
+  // chance of binding to the wrong game. Returns:
+  //   { espnGame, underdogSide: "home"|"away", confidence: "green"|"yellow" }
+  //   or null if no confident match.
+  // green  = both team AND opponent matched (high confidence)
+  // yellow = only the team matched, unambiguously (one game) — worth a glance
+  function matchUnderdogToEspn(pick, espnGames) {
+    const t = normalizeTeamName(pick.team);
+    const o = normalizeTeamName(pick.opponent);
+    if (!t) return null;
+
+    // GREEN: both team and opponent match exactly (either orientation)
+    for (const e of espnGames) {
+      const hk = espnHomeKeys(e), ak = espnAwayKeys(e);
+      if (hk.has(t) && o && ak.has(o)) return { espnGame: e, underdogSide: "home", confidence: "green" };
+      if (ak.has(t) && o && hk.has(o)) return { espnGame: e, underdogSide: "away", confidence: "green" };
+    }
+
+    // YELLOW: the team appears in exactly ONE game (unambiguous), opponent didn't
+    // clearly match. Still safe to bind — a team plays once per window — but flagged.
+    const teamGames = espnGames.filter((e) => espnHomeKeys(e).has(t) || espnAwayKeys(e).has(t));
+    if (teamGames.length === 1) {
+      const e = teamGames[0];
+      const side = espnHomeKeys(e).has(t) ? "home" : "away";
+      return { espnGame: e, underdogSide: side, confidence: "yellow" };
+    }
+
+    return null; // no match, or ambiguous (team in multiple games) — don't guess
+  }
+
+  // Auto-score every member's underdog pick for a week from ESPN. Fully automatic:
+  // scores "won outright" as each underdog's game goes final. Respects manual
+  // overrides (underdogResultManual) and never re-scores those. Records a
+  // confidence tag so the commissioner can spot-check fuzzy matches.
+  async function autoScoreUnderdogs(weekNum) {
+    const week = weekCache[weekNum];
+    if (!week?.weekDates?.from || !week?.weekDates?.to) return;
+    const weekPicks = picksCache[weekNum] || {};
+    // Anyone with an underdog pick that isn't manually set and isn't already scored
+    const pending = Object.entries(weekPicks).filter(([, p]) =>
+      p?.underdogPick && !p.underdogResultManual && (p.underdogResult === null || p.underdogResult === undefined)
+    );
+    if (pending.length === 0) return;
+
+    let espnGames;
+    try {
+      espnGames = await fetchEspnScoresForDates(week.weekDates.from, week.weekDates.to);
+    } catch {
+      return;
+    }
+
+    const updates = {};
+    for (const [slug, p] of pending) {
+      const match = matchUnderdogToEspn(p.underdogPick, espnGames);
+      if (!match) continue; // couldn't confidently find the game — leave pending
+      const { espnGame, underdogSide, confidence } = match;
+      if (!espnGame.completed) continue; // game not final yet
+      const udScore = underdogSide === "home" ? espnGame.homeScore : espnGame.awayScore;
+      const oppScore = underdogSide === "home" ? espnGame.awayScore : espnGame.homeScore;
+      if (udScore == null || oppScore == null) continue;
+      const won = udScore > oppScore; // "won outright" — straight up, not vs spread
+      const payload = { ...p, underdogResult: won, underdogAutoConfidence: confidence };
+      const r = await storage.set(`week:${weekNum}:picks:${slug}`, JSON.stringify(payload), true).catch(() => null);
+      if (r) updates[slug] = payload;
+    }
+    if (Object.keys(updates).length) {
+      setPicksCache((prev) => ({ ...prev, [weekNum]: { ...(prev[weekNum] || {}), ...updates } }));
+    }
   }
 
   async function autoGradeWeek(weekNum) {
@@ -2246,6 +2318,7 @@ export default function App() {
     setLastAutoCheckTime(now);
     for (const w of weeksToGrade) {
       await autoGradeWeek(w);
+      await autoScoreUnderdogs(w);
     }
     checkInProgressRef.current = false;
   };
@@ -5979,49 +6052,80 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
             <div className="mt-2 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
               <div className="cfb-display text-lg uppercase mb-2">Underdog of the week</div>
               <div className="text-xs mb-3" style={{ color: COLORS.muted }}>
-                Mark each submitted underdog pick yes/no once that game's final is known. The underdog must have won
-                outright to hit.
+                Underdog picks score automatically as each game goes final — the underdog must win outright.
+                <span style={{ color: "#3fae5a" }}> ● green</span> = team + opponent matched exactly;
+                <span style={{ color: "#d9a441" }}> ● yellow</span> = fuzzy match, worth a glance. You can override any result below.
               </div>
               <div className="space-y-2">
                 {Object.entries(weekPicks)
                   .filter(([, p]) => p?.underdogPick)
-                  .map(([slug, p]) => (
+                  .map(([slug, p]) => {
+                    const autoResult = p.underdogResult;
+                    const conf = p.underdogAutoConfidence;
+                    const isManual = p.underdogResultManual;
+                    return (
                     <div
                       key={slug}
                       className="flex items-center gap-2 px-3 py-2"
                       style={{ background: COLORS.fieldDeep, border: `1px solid ${COLORS.line}` }}
                     >
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold truncate">{p.name || slug}</div>
+                        <div className="text-sm font-semibold truncate flex items-center gap-1.5">
+                          {p.name || slug}
+                          {/* Auto-score status */}
+                          {autoResult === true && !isManual && (
+                            <span className="cfb-mono" style={{ fontSize: "0.6rem", color: "#3fae5a" }}>✓ hit (auto)</span>
+                          )}
+                          {autoResult === false && !isManual && (
+                            <span className="cfb-mono" style={{ fontSize: "0.6rem", color: COLORS.redBright }}>✗ miss (auto)</span>
+                          )}
+                          {isManual && (
+                            <span className="cfb-mono" style={{ fontSize: "0.6rem", color: COLORS.muted }}>manual</span>
+                          )}
+                          {autoResult == null && !isManual && (
+                            <span className="cfb-mono" style={{ fontSize: "0.6rem", color: COLORS.muted }}>pending</span>
+                          )}
+                          {/* Confidence dot for auto-scored results */}
+                          {conf && !isManual && autoResult != null && (
+                            <span title={conf === "green" ? "exact match" : "fuzzy match — double-check"} style={{ color: conf === "green" ? "#3fae5a" : "#d9a441", fontSize: "0.7rem" }}>●</span>
+                          )}
+                        </div>
                         <div className="cfb-mono text-xs truncate" style={{ color: COLORS.muted }}>
                           {p.underdogPick.team} +{p.underdogPick.spread} vs {p.underdogPick.opponent}
                         </div>
                       </div>
                       <div className="flex gap-1.5 flex-shrink-0">
-                        {["yes", "no"].map((opt) => (
+                        {["yes", "no"].map((opt) => {
+                          // Reflect the auto result in the toggle unless commish already changed it
+                          const effective = udStatuses[slug] !== undefined
+                            ? udStatuses[slug]
+                            : (autoResult === true ? "yes" : autoResult === false ? "no" : undefined);
+                          return (
                           <button
                             key={opt}
                             onClick={() => setUdStatuses((prev) => ({ ...prev, [slug]: opt }))}
                             className="cfb-mono cfb-btn text-xs font-semibold px-2.5 py-2 capitalize"
                             style={{
                               background:
-                                udStatuses[slug] === opt
+                                effective === opt
                                   ? opt === "yes"
                                     ? "rgba(217,164,65,0.18)"
                                     : "rgba(179,55,42,0.18)"
                                   : "transparent",
                               border: `1px solid ${
-                                udStatuses[slug] === opt ? (opt === "yes" ? COLORS.gold : COLORS.red) : COLORS.lineStrong
+                                effective === opt ? (opt === "yes" ? COLORS.gold : COLORS.red) : COLORS.lineStrong
                               }`,
-                              color: udStatuses[slug] === opt ? (opt === "yes" ? COLORS.goldBright : COLORS.redBright) : COLORS.chalkDim,
+                              color: effective === opt ? (opt === "yes" ? COLORS.goldBright : COLORS.redBright) : COLORS.chalkDim,
                             }}
                           >
                             {opt}
                           </button>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
               </div>
               <div className="mt-3">
                 <SecondaryButton
@@ -6036,7 +6140,7 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
                     setUdBusy(false);
                   }}
                 >
-                  {udBusy ? "Saving..." : "Save underdog results"}
+                  {udBusy ? "Saving..." : "Save manual overrides"}
                 </SecondaryButton>
               </div>
             </div>
