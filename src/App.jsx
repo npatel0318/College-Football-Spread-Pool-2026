@@ -2529,6 +2529,8 @@ export default function App() {
             standings={standings}
             loading={standingsLoading}
             onRefresh={loadStandings}
+            moneyData={moneyData}
+            loadMoneyData={loadMoneyData}
           />
         )}
 
@@ -4237,11 +4239,27 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
 
 /* ----------------------------- standings tab -------------------------------- */
 
-function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
+function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, loadMoneyData }) {
+  // Ensure money is loaded so the total-$ column is populated (money normally
+  // only loads when the Money tab opens).
+  useEffect(() => {
+    if (!moneyData && loadMoneyData) loadMoneyData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moneyData]);
+
   if (loading && !standings) return <Spinner label="Tallying the season..." />;
 
+  // Per-member net dollars: weekly + lock + underdog + commissioner adjustments.
+  function memberMoney(name) {
+    const m = moneyData?.perMember?.[name];
+    if (!m) return null;
+    return (m.weeklyWin || 0) - (m.weeklyLoss || 0)
+         + (m.lockWin || 0) - (m.lockLoss || 0)
+         + (m.underdogWin || 0) + (m.adjustments || 0);
+  }
+
   const rows = Object.entries(standings || {})
-    .map(([name, s]) => ({ name, ...s }))
+    .map(([name, s]) => ({ name, ...s, money: memberMoney(name) }))
     .sort((a, b) => b.totalWins - a.totalWins);
 
   const gradedWeeks = leagueMeta.weeks.length;
@@ -4273,6 +4291,7 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
                 {hasWinTotals && <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>win totals</th>}
                 {hasPlayoff && <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>playoff</th>}
                 <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total</th>
+                <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>total $</th>
                 <th className="text-right px-3 py-2" style={{ color: COLORS.chalkDim }}>weeks won</th>
               </tr>
             </thead>
@@ -4292,6 +4311,9 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh }) {
                   )}
                   <td className="px-3 py-2 text-right font-bold whitespace-nowrap">
                     {Number.isInteger(r.totalWins) ? r.totalWins : r.totalWins.toFixed(2)}-{r.totalLosses}
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold whitespace-nowrap" style={{ color: r.money == null ? COLORS.muted : r.money > 0 ? COLORS.goldBright : r.money < 0 ? COLORS.redBright : COLORS.chalkDim }}>
+                    {r.money == null ? "—" : `${r.money > 0 ? "+" : r.money < 0 ? "−" : ""}$${Math.abs(r.money).toFixed(2).replace(/\.00$/, "")}`}
                   </td>
                   <td className="px-3 py-2 text-right">{r.weeksWon}</td>
                 </tr>
