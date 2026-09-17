@@ -1086,6 +1086,46 @@ export default function App() {
     setPicksCache((prev) => { const n = { ...prev }; delete n[weekNum]; return n; });
   }
 
+  // Repair a week whose game IDs changed out from under its picks (e.g. a swap
+  // that minted new IDs). Removes any pick entries — weekly picks AND lock —
+  // that point to game IDs no longer in the week, so "shows picks but they're
+  // gone" inconsistency is resolved. Picks for still-existing games are kept.
+  // Returns { membersFixed, picksRemoved } or null on failure.
+  async function cleanOrphanedPicks(weekNum) {
+    const week = weekCache[weekNum];
+    if (!week) return null;
+    const validIds = new Set((week.games || []).map((g) => g.id));
+    const weekPicks = picksCache[weekNum] || {};
+    let membersFixed = 0;
+    let picksRemoved = 0;
+    const updates = {};
+    for (const [slug, p] of Object.entries(weekPicks)) {
+      if (!p) continue;
+      const picks = p.picks || {};
+      const kept = {};
+      let removedForMember = 0;
+      for (const [gid, side] of Object.entries(picks)) {
+        if (validIds.has(gid)) kept[gid] = side;
+        else removedForMember += 1;
+      }
+      // Clear a lock that points to a game that no longer exists
+      const lockOrphaned = p.lockedGameId && !validIds.has(p.lockedGameId);
+      if (removedForMember === 0 && !lockOrphaned) continue; // nothing to fix
+      const payload = { ...p, picks: kept };
+      if (lockOrphaned) payload.lockedGameId = null;
+      const r = await storage.set(`week:${weekNum}:picks:${slug}`, JSON.stringify(payload), true).catch(() => null);
+      if (r) {
+        updates[slug] = payload;
+        membersFixed += 1;
+        picksRemoved += removedForMember;
+      }
+    }
+    if (Object.keys(updates).length) {
+      setPicksCache((prev) => ({ ...prev, [weekNum]: { ...(prev[weekNum] || {}), ...updates } }));
+    }
+    return { membersFixed, picksRemoved };
+  }
+
   async function addMember(name) {
     const slug = slugify(name);
     const existingTokens = leagueMeta.memberTokens || {};
@@ -2603,6 +2643,7 @@ export default function App() {
             weekCache={weekCache}
             loadWeek={loadWeek}
             saveWeekGames={saveWeekGames}
+            cleanOrphanedPicks={cleanOrphanedPicks}
             toggleLock={toggleLock}
             toggleShowPicksEarly={toggleShowPicksEarly}
             toggleHidePicksUntilKickoff={toggleHidePicksUntilKickoff}
@@ -4340,6 +4381,7 @@ function CommishTab({
   weekCache,
   loadWeek,
   saveWeekGames,
+  cleanOrphanedPicks,
   toggleLock,
   toggleShowPicksEarly,
   toggleHidePicksUntilKickoff,
@@ -4624,6 +4666,7 @@ function CommishTab({
           weekCache={weekCache}
           loadWeek={loadWeek}
           saveWeekGames={saveWeekGames}
+          cleanOrphanedPicks={cleanOrphanedPicks}
           toggleLock={toggleLock}
           toggleShowPicksEarly={toggleShowPicksEarly}
           toggleHidePicksUntilKickoff={toggleHidePicksUntilKickoff}
@@ -5380,7 +5423,7 @@ function emptyGame() {
   };
 }
 
-function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLock, toggleShowPicksEarly, toggleHidePicksUntilKickoff, deleteWeek }) {
+function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrphanedPicks, toggleLock, toggleShowPicksEarly, toggleHidePicksUntilKickoff, deleteWeek }) {
   const nextWeekNum = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) + 1 : 1;
   const defaultYear = new Date().getFullYear();
 
@@ -5412,6 +5455,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
   const [importPreview, setImportPreview] = useState(null);
   const [importSelected, setImportSelected] = useState({});
   const [confirmingGames, setConfirmingGames] = useState(null);
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanNote, setCleanNote] = useState(null);
 
   // ── responsive layout (import panel) ─────────────────────────────────────
   const [isDesktop, setIsDesktop] = useState(typeof window !== "undefined" && window.innerWidth >= 768);
@@ -5505,7 +5550,34 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
     const chosen = importPreview.filter((_, i) => importSelected[i]);
     if (!chosen.length) return;
     const sorted = [...chosen].sort((a, b) => kickoffSortKey(a.kickoffTime) - kickoffSortKey(b.kickoffTime));
-    setConfirmingGames(sorted.map((g) => ({ ...g, id: newId(), spread: String(g.spread) })));
+
+    // Preserve the existing game's ID when an incoming game is the SAME matchup
+    // (same two teams, same kickoff date). Picks are keyed by game ID, so keeping
+    // the ID stable means picks for unchanged games survive a re-import; only a
+    // genuinely swapped-out game loses its picks. New matchups get a fresh ID.
+    const dayOf = (iso) => (iso ? new Date(iso).toISOString().slice(0, 10) : "");
+    const sameMatchup = (a, b) => {
+      const at = new Set([normalizeTeamName(a.home), normalizeTeamName(a.away)].filter(Boolean));
+      const bt = new Set([normalizeTeamName(b.home), normalizeTeamName(b.away)].filter(Boolean));
+      const teamsMatch = at.size === 2 && bt.size === 2 && [...at].every((t) => bt.has(t));
+      if (!teamsMatch) return false;
+      // If both have kickoff dates, require the day to match too (guards against a
+      // rematch later in the season); if either lacks a date, teams alone suffice.
+      const ad = dayOf(a.kickoffISO), bd = dayOf(b.kickoffISO);
+      if (ad && bd) return ad === bd;
+      return true;
+    };
+
+    const usedExistingIds = new Set();
+    const mapped = sorted.map((g) => {
+      const existing = games.find((e) => !usedExistingIds.has(e.id) && sameMatchup(e, g));
+      if (existing) {
+        usedExistingIds.add(existing.id);
+        return { ...g, id: existing.id, spread: String(g.spread) }; // keep ID → picks survive
+      }
+      return { ...g, id: newId(), spread: String(g.spread) }; // new matchup → new ID
+    });
+    setConfirmingGames(mapped);
   }
 
   function handleConfirmGames() {
@@ -5919,6 +5991,36 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, toggleLo
             <Eye size={12} />
             {currentWeekData.hidePicksUntilKickoff ? "picks hidden until kickoff — click to make visible" : "picks visible — click to hide until kickoff"}
           </button>
+        </div>
+      )}
+
+      {/* ── Repair orphaned picks (fixes weeks where a swap changed game IDs) ── */}
+      {selectedWeek != null && currentWeekData && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={async () => {
+              setCleaning(true);
+              setCleanNote(null);
+              const res = await cleanOrphanedPicks(selectedWeek);
+              setCleaning(false);
+              if (res) {
+                setCleanNote(
+                  res.picksRemoved === 0
+                    ? "No orphaned picks — everything lines up with the current games."
+                    : `Cleaned ${res.picksRemoved} orphaned pick${res.picksRemoved === 1 ? "" : "s"} across ${res.membersFixed} member${res.membersFixed === 1 ? "" : "s"}.`
+                );
+              } else {
+                setCleanNote("Couldn't run cleanup — try again.");
+              }
+            }}
+            disabled={cleaning}
+            className="cfb-mono text-xs flex items-center gap-1.5"
+            style={{ color: COLORS.chalkDim }}
+          >
+            <RefreshCw size={11} className={cleaning ? "animate-spin" : ""} />
+            {cleaning ? "Checking picks…" : "Repair orphaned picks"}
+          </button>
+          {cleanNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{cleanNote}</span>}
         </div>
       )}
 
