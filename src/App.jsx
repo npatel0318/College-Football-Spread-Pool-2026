@@ -925,7 +925,9 @@ export default function App() {
     const newLockedGameId =
       currentPick === side && existing.lockedGameId === gameId ? null : existing.lockedGameId;
 
-    const payload = { name: myName, picks: updatedPicks, lockedGameId: newLockedGameId, submittedAt: Date.now() };
+    // Preserve every other field on the pick doc (underdogPick, underdogResult,
+    // underdogResultManual, etc.) — only picks/lock change here.
+    const payload = { ...existing, name: myName, picks: updatedPicks, lockedGameId: newLockedGameId, submittedAt: Date.now() };
     const r = await storage
       .set(`week:${weekNum}:picks:${mySlug}`, JSON.stringify(payload), true)
       .catch(() => null);
@@ -977,12 +979,21 @@ export default function App() {
   }
 
   async function saveUnderdogPick(weekNum, underdogPick) {
-    // Guard: once the commissioner locks the week, underdog picks are frozen.
-    // (Underdog can be any FBS game with no stored kickoff, so we can't do a
-    // per-game kickoff check here — the week lock is the enforceable boundary.)
+    // Guard 1: once the commissioner locks the week, underdog picks are frozen.
     if (weekCache[weekNum]?.locked) {
       setError("This week is locked — underdog picks can no longer be changed.");
       return false;
+    }
+    // Guard 2: if setting a real pick, verify the game hasn't kicked off. This is
+    // the save-time backstop for the on-entry UI check (prevents a stale client
+    // from committing a pick on a game that already started).
+    if (underdogPick?.team) {
+      const wd = weekCache[weekNum]?.weekDates;
+      const live = await fetchUnderdogLive(underdogPick, wd).catch(() => null);
+      if (live?.started === true) {
+        setError(`${underdogPick.team} vs ${underdogPick.opponent} has already kicked off — you can't pick that game.`);
+        return false;
+      }
     }
     const mySlug = slugify(myName);
     const existing = picksCache[weekNum]?.[mySlug] || {};
@@ -3555,6 +3566,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
 
       <UnderdogOfWeekCard
         weekNum={selectedWeek}
+        weekDates={week.weekDates}
         locked={week.locked || (udLive?.started === true)}
         kickedOff={udLive?.started === true}
         live={udLive}
@@ -3574,25 +3586,53 @@ function isCorrectIcon(cover, myPick) {
   return <XCircle size={14} style={{ color: COLORS.redBright }} />;
 }
 
-function UnderdogOfWeekCard({ weekNum, locked, kickedOff, live, existingPick, existingResult, saveUnderdogPick }) {
+function UnderdogOfWeekCard({ weekNum, weekDates, locked, kickedOff, live, existingPick, existingResult, saveUnderdogPick }) {
   const [team, setTeam] = useState(existingPick?.team || "");
   const [opponent, setOpponent] = useState(existingPick?.opponent || "");
   const [spread, setSpread] = useState(existingPick?.spread != null ? String(existingPick.spread) : "");
   const [saving, setSaving] = useState(false);
+  // On-entry detection: as the user types the team + opponent, look up the game
+  // on ESPN to (a) confirm the matchup + kickoff time, and (b) block entry if it
+  // already kicked off. detect = { started, kickoffISO, dogName, oppName } | null
+  const [detect, setDetect] = useState(null);
+  const [detecting, setDetecting] = useState(false);
 
   useEffect(() => {
     setTeam(existingPick?.team || "");
     setOpponent(existingPick?.opponent || "");
     setSpread(existingPick?.spread != null ? String(existingPick.spread) : "");
+    setDetect(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [weekNum]);
 
+  // Debounced lookup whenever team + opponent are both filled in (and not already
+  // saved/locked). Finds the game so we can show kickoff time or block if started.
+  useEffect(() => {
+    if (locked || !team.trim() || !opponent.trim()) { setDetect(null); return; }
+    let stale = false;
+    setDetecting(true);
+    const id = setTimeout(async () => {
+      const data = await fetchUnderdogLive({ team: team.trim(), opponent: opponent.trim() }, weekDates).catch(() => null);
+      if (!stale) { setDetect(data); setDetecting(false); }
+    }, 700);
+    return () => { stale = true; clearTimeout(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [team, opponent, weekDates?.from, weekDates?.to, locked]);
+
   const spreadNum = Number(spread);
-  const valid = team.trim() && opponent.trim() && spread !== "" && !isNaN(spreadNum) && spreadNum >= 14;
+  const validFields = team.trim() && opponent.trim() && spread !== "" && !isNaN(spreadNum) && spreadNum >= 14;
+  // Block save if the detected game has already kicked off
+  const detectedStarted = detect?.started === true;
+  const valid = validFields && !detectedStarted;
 
   let resultColor = COLORS.chalkDim;
   if (existingResult === true) resultColor = COLORS.goldBright;
   else if (existingResult === false) resultColor = COLORS.redBright;
+
+  // Format detected kickoff time (local)
+  const kickoffLabel = detect?.kickoffISO
+    ? new Date(detect.kickoffISO).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })
+    : null;
 
   // Live/final score panel for the underdog's game
   const livePanel = existingPick && live && (live.inProgress || live.completed) ? (() => {
@@ -3677,11 +3717,38 @@ function UnderdogOfWeekCard({ weekNum, locked, kickedOff, live, existingPick, ex
           )}
         </div>
       )}
-      {!valid && (team || opponent || spread) && !locked && (
+      {!valid && !detectedStarted && (team || opponent || spread) && !locked && (
         <div className="text-xs mt-1.5" style={{ color: COLORS.muted }}>
           Needs a team, an opponent, and a spread of at least +14.
         </div>
       )}
+
+      {/* On-entry game detection feedback */}
+      {!locked && team.trim() && opponent.trim() && (
+        <div className="mt-1.5">
+          {detecting && (
+            <div className="cfb-mono text-xs flex items-center gap-1.5" style={{ color: COLORS.muted }}>
+              <RefreshCw size={11} className="animate-spin" /> checking game…
+            </div>
+          )}
+          {!detecting && detectedStarted && (
+            <div className="cfb-mono text-xs flex items-center gap-1.5" style={{ color: COLORS.redBright }}>
+              <Lock size={11} /> {detect.dogName || team} vs {detect.oppName || opponent} has already kicked off — you can't pick this game.
+            </div>
+          )}
+          {!detecting && detect && !detectedStarted && kickoffLabel && (
+            <div className="cfb-mono text-xs flex items-center gap-1.5" style={{ color: "#3fae5a" }}>
+              <CheckCircle2 size={11} /> {detect.dogName || team} vs {detect.oppName || opponent} · kicks off {kickoffLabel}
+            </div>
+          )}
+          {!detecting && detect === null && (
+            <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+              Couldn't find that matchup on ESPN — double-check the team and opponent names.
+            </div>
+          )}
+        </div>
+      )}
+
       {kickedOff && existingPick && (
         <div className="cfb-mono text-xs mt-2 flex items-center gap-1.5" style={{ color: COLORS.muted }}>
           <Lock size={11} /> your underdog game has kicked off — pick is locked
