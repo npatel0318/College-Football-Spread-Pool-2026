@@ -2876,8 +2876,28 @@ function IdentifyScreen({ leagueName }) {
 /* ------------------------------- picks tab --------------------------------- */
 
 function LiveScorePanel({ game, data }) {
-  if (!data) return null;
-  // Don't render if the game hasn't started (no period yet)
+  // Fall back to the stored final score when there's no live poll data. This is
+  // what keeps finished/graded weeks showing their final scoreboard permanently
+  // (live polling stops once a week is graded, and live data is not persisted).
+  if (!data) {
+    if (game.homeScore != null && game.awayScore != null) {
+      data = {
+        homeScore: game.homeScore,
+        awayScore: game.awayScore,
+        completed: true,
+        inProgress: false,
+        period: 0,
+        clock: "",
+        shortDetail: "Final",
+        downDistance: "",
+        isRedZone: false,
+        possession: null,
+      };
+    } else {
+      return null;
+    }
+  }
+  // Don't render if the game hasn't started (no period yet) and has no final score
   if (!data.inProgress && !data.completed) return null;
 
   const {
@@ -2930,109 +2950,108 @@ function LiveScorePanel({ game, data }) {
     }
   }
 
+  // Team colors drive the abbreviation text. Some schools use near-black colors
+  // that vanish on the dark panel — lift those to a readable floor.
+  function readableTeamColor(hex, fallback) {
+    const h = (hex || "").replace("#", "");
+    if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return fallback || COLORS.chalk;
+    const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b; // perceived brightness
+    if (lum < 70) return "#b8b8ae"; // too dark for the black panel — use light chalk
+    return `#${h}`;
+  }
+  const awayColor = readableTeamColor(game.awayColor, COLORS.chalk);
+  const homeColor = readableTeamColor(game.homeColor, COLORS.chalk);
+  const awayLogo = game.awayLogo || null;
+  const homeLogo = game.homeLogo || null;
+
+  // LED digit colors: winner/leader glows amber; the other side is dimmed olive.
+  // Before any score (pre-game placeholder handled by caller), both dim.
+  const GOLD = "#f5b301";
+  const DIM = "#8a8a5a";
+  const awayDigit = awayLeads ? GOLD : DIM;
+  const homeDigit = homeLeads ? GOLD : DIM;
+  const awayGlow = awayLeads ? "0 0 12px rgba(245,179,1,0.5)" : "0 0 6px rgba(138,138,90,0.25)";
+  const homeGlow = homeLeads ? "0 0 12px rgba(245,179,1,0.5)" : "0 0 6px rgba(138,138,90,0.25)";
+
+  const TeamRow = ({ logo, abbr, color, digit, glow, score, hasPoss }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      {logo ? (
+        <img src={logo} width={32} height={32} alt="" style={{ flexShrink: 0, objectFit: "contain" }} />
+      ) : (
+        <div style={{ width: 32, height: 32, flexShrink: 0 }} />
+      )}
+      <span
+        className="cfb-mono flex items-center gap-1"
+        style={{ fontSize: "0.92rem", letterSpacing: "0.1em", color, flex: 1, minWidth: 0 }}
+      >
+        {hasPoss && <span style={{ fontSize: "0.7rem" }}>🏈</span>}
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{abbr}</span>
+      </span>
+      <span
+        className="cfb-mono"
+        style={{ fontWeight: 500, fontSize: "2.5rem", lineHeight: 1, color: digit, textShadow: glow, minWidth: 44, textAlign: "right" }}
+      >
+        {score}
+      </span>
+    </div>
+  );
+
   return (
     <div
       style={{
-        background: "#0e0e11",
-        border: `1px solid ${isRedZone && inProgress ? "rgba(220,60,60,0.45)" : COLORS.lineStrong}`,
-        borderRadius: 5,
-        padding: "10px 12px",
+        background: "#0a0a0c",
+        border: `1px solid ${isRedZone && inProgress ? "rgba(220,60,60,0.5)" : "#26261f"}`,
+        borderRadius: 8,
+        padding: "13px 15px",
         marginBottom: 8,
       }}
     >
-      {/* Status row */}
+      {/* LED status row */}
       <div
         className="cfb-mono flex items-center justify-between"
-        style={{ marginBottom: 8, fontSize: "0.67rem", letterSpacing: "0.06em" }}
+        style={{ marginBottom: 11, fontSize: "0.65rem", letterSpacing: "0.16em" }}
       >
         <span
           className="flex items-center gap-1.5"
-          style={{ color: inProgress ? "#e05050" : COLORS.chalkDim, fontWeight: 700 }}
+          style={{ color: inProgress ? "#e05050" : completed ? "#ef9f27" : COLORS.muted, fontWeight: 700 }}
         >
           {inProgress && (
-            <span
-              className="animate-pulse"
-              style={{ width: 6, height: 6, borderRadius: "50%", background: "#e05050", display: "inline-block" }}
-            />
+            <span className="animate-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: "#e05050", display: "inline-block" }} />
           )}
-          {completed ? "FINAL" : inProgress ? "LIVE" : ""}
+          {completed ? "■ FINAL" : inProgress ? "● LIVE" : ""}
         </span>
-        <span style={{ color: COLORS.chalkDim }}>
-          {coveringText && <span style={{ color: COLORS.muted, marginRight: 8 }}>{coveringText}</span>}
-          {!completed && clockLine}
+        <span className="flex items-center gap-2" style={{ letterSpacing: "0.1em" }}>
+          {coveringText && <span style={{ color: COLORS.muted }}>{coveringText}</span>}
+          {!completed && <span style={{ color: "#8a8a80" }}>{clockLine}</span>}
         </span>
       </div>
 
-      {/* Scores */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr auto 1fr",
-          alignItems: "center",
-          gap: 8,
-          textAlign: "center",
-        }}
-      >
-        {/* Away */}
-        <div>
-          <div
-            className="cfb-mono flex items-center justify-center gap-1"
-            style={{
-              fontSize: "0.62rem", letterSpacing: "0.07em", marginBottom: 3,
-              color: possession === "away" ? COLORS.goldBright : COLORS.muted,
-            }}
-          >
-            {possession === "away" && <span>🏈</span>}
-            <span>{awayAbbr}</span>
-          </div>
-          <div
-            className="cfb-mono font-bold"
-            style={{ fontSize: "2.1rem", lineHeight: 1, color: awayLeads ? COLORS.chalk : COLORS.chalkDim }}
-          >
-            {awayScore}
-          </div>
-        </div>
+      {/* Away team */}
+      <TeamRow
+        logo={awayLogo} abbr={awayAbbr} color={awayColor}
+        digit={awayDigit} glow={awayGlow} score={awayScore} hasPoss={possession === "away"}
+      />
 
-        {/* Middle: down & distance */}
-        <div style={{ paddingTop: 16, minWidth: 72 }}>
-          {!isHalf && !completed && downDistance ? (
-            <div
-              className="cfb-mono"
-              style={{
-                fontSize: "0.6rem",
-                color: isRedZone ? "#e05050" : COLORS.muted,
-                whiteSpace: "nowrap",
-                textAlign: "center",
-                lineHeight: 1.4,
-              }}
-            >
-              {downDistance}
-            </div>
-          ) : (
-            <div style={{ color: COLORS.muted, textAlign: "center" }}>—</div>
-          )}
-        </div>
-
-        {/* Home */}
-        <div>
-          <div
-            className="cfb-mono flex items-center justify-center gap-1"
-            style={{
-              fontSize: "0.62rem", letterSpacing: "0.07em", marginBottom: 3,
-              color: possession === "home" ? COLORS.goldBright : COLORS.muted,
-            }}
-          >
-            <span>{homeAbbr}</span>
-            {possession === "home" && <span>🏈</span>}
-          </div>
-          <div
-            className="cfb-mono font-bold"
-            style={{ fontSize: "2.1rem", lineHeight: 1, color: homeLeads ? COLORS.chalk : COLORS.chalkDim }}
-          >
-            {homeScore}
-          </div>
-        </div>
+      {/* Divider (with down & distance in the middle when live) */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "9px 0" }}>
+        <div style={{ flex: 1, height: 1, background: "#1e1e18" }} />
+        {!isHalf && !completed && downDistance && (
+          <span className="cfb-mono" style={{ fontSize: "0.58rem", letterSpacing: "0.05em", color: isRedZone ? "#e05050" : COLORS.muted, whiteSpace: "nowrap" }}>
+            {downDistance}
+          </span>
+        )}
+        {isHalf && (
+          <span className="cfb-mono" style={{ fontSize: "0.58rem", letterSpacing: "0.08em", color: COLORS.muted }}>HALFTIME</span>
+        )}
+        <div style={{ flex: 1, height: 1, background: "#1e1e18" }} />
       </div>
+
+      {/* Home team */}
+      <TeamRow
+        logo={homeLogo} abbr={homeAbbr} color={homeColor}
+        digit={homeDigit} glow={homeGlow} score={homeScore} hasPoss={possession === "home"}
+      />
     </div>
   );
 }
@@ -3350,8 +3369,9 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                     </span>
                   </div>
 
-                  {/* Live score panel — shows for any locked game that ESPN has data for */}
-                  {(autoLockedGameIds.has(g.id) || week.locked) && (
+                  {/* Score panel — shows for any game that's locked (kicked off)
+                      or already has a final score stored (finished weeks). */}
+                  {(autoLockedGameIds.has(g.id) || week.locked || (g.homeScore != null && g.awayScore != null)) && (
                     <LiveScorePanel game={g} data={liveScores[g.id]} />
                   )}
 
