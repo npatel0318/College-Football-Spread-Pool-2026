@@ -4255,26 +4255,14 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
                 const slug = slugify(m);
                 const pick = picksCache[slug]?.underdogPick;
                 const result = picksCache[slug]?.underdogResult;
-                const udGame = pick
-                  ? week.games.find((g) => {
-                      const dog = g.favorite === "home" ? g.away : g.home;
-                      return dog?.toLowerCase() === pick?.team?.toLowerCase();
-                    })
-                  : null;
-                const udColor = udGame
-                  ? (udGame.favorite === "home" ? udGame.awayColor : udGame.homeColor)
-                  : null;
                 let textColor = COLORS.chalkDim;
                 if (pick && result === true)  textColor = COLORS.goldBright;
                 if (pick && result === false) textColor = COLORS.redBright;
                 return (
                   <td key={m} className="px-1 py-1.5 text-center" style={{ color: textColor }}>
                     {pick ? (
-                      <span className="inline-flex items-center justify-center gap-0.5">
-                        <TeamDot color={udColor} size={7} />
-                        <span style={{ fontSize: "0.62rem", fontWeight: 600 }}>
-                          {teamAbbrev(pick.team || pick)}
-                        </span>
+                      <span style={{ fontSize: "0.62rem", fontWeight: 600 }}>
+                        {teamAbbrev(pick.team || pick)}
                       </span>
                     ) : (
                       <span style={{ color: COLORS.muted, fontSize: "0.65rem" }}>—</span>
@@ -4286,11 +4274,52 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
           </tbody>
         </table>
       </div>
+
+      {/* Underdog detail list — full school name + entered spread, reads cleanly
+          on mobile (vertical list rather than a cramped grid cell). Respects the
+          same hide-until-kickoff rule as the grid. */}
+      {(() => {
+        const showUnderdogs = !(hideUntilKickoff && !week.locked && !week.graded);
+        if (!showUnderdogs) return null;
+        const entries = members
+          .map((m) => ({ m, pick: picksCache[slugify(m)]?.underdogPick, result: picksCache[slugify(m)]?.underdogResult }))
+          .filter((e) => e.pick);
+        if (entries.length === 0) return null;
+        return (
+          <div className="mt-4">
+            <div className="cfb-mono text-xs uppercase mb-2 flex items-center gap-1.5" style={{ color: COLORS.gold, letterSpacing: "0.06em" }}>
+              <Flame size={11} /> Underdog picks
+            </div>
+            <div style={{ border: `1px solid ${COLORS.line}` }}>
+              {entries.map((e, i) => {
+                let valueColor = COLORS.chalk;
+                if (e.result === true) valueColor = COLORS.goldBright;
+                else if (e.result === false) valueColor = COLORS.redBright;
+                return (
+                  <div
+                    key={e.m}
+                    className="flex items-center justify-between gap-3 px-3 py-2"
+                    style={{ borderTop: i === 0 ? "none" : `1px solid ${COLORS.line}`, background: COLORS.fieldDeep }}
+                  >
+                    <span className="text-sm" style={{ color: COLORS.chalkDim, flexShrink: 0 }}>
+                      {e.m}
+                    </span>
+                    <span className="cfb-mono text-sm text-right" style={{ color: valueColor, minWidth: 0 }}>
+                      <span style={{ fontWeight: 600 }}>{e.pick.team}</span>
+                      <span style={{ color: e.result == null ? COLORS.muted : valueColor }}> +{e.pick.spread}</span>
+                      {e.result === true && <span style={{ color: COLORS.goldBright }}> ✓</span>}
+                      {e.result === false && <span style={{ color: COLORS.redBright }}> ✗</span>}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
-
-/* ----------------------------- standings tab -------------------------------- */
 
 function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, loadMoneyData }) {
   // Ensure money is loaded so the total-$ column is populated (money normally
