@@ -3899,11 +3899,9 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
     // Underdog money
     let udAmount = 0;
     if (underdogPick && underdogResult === true) {
-      const udGame = week.games.find((g) => {
-        const dog = g.favorite === "home" ? g.away : g.home;
-        return dog?.toLowerCase() === underdogPick.toLowerCase();
-      });
-      udAmount = underdogPayout(udGame?.spread || 0, settings);
+      // underdogPick is an object { team, opponent, spread }; use the stored
+      // spread directly for the payout tier (no need to re-find the game).
+      udAmount = underdogPayout(underdogPick.spread || 0, settings);
     }
 
     return { name, wins, losses, lockResult, submitted, underdogResult, udAmount, synthetic: false };
