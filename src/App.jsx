@@ -1414,10 +1414,24 @@ export default function App() {
 
     // Progressive save: write scores for finished games now. Games still in
     // progress or unmatched keep their existing (null) score.
+    // The board and ESPN can disagree on which team is home; map ESPN's scores to
+    // the BOARD's orientation by team name so a final score is never flipped
+    // (which would flip the cover and pay the wrong side).
+    const espnScoresForBoard = (game, espn) => {
+      const bh = normalizeTeamName(game.home);
+      const espnHomeKeys = new Set([espn.homeTeam, espn.homeLocation, espn.homeShort].map(normalizeTeamName).filter(Boolean));
+      const espnHomeIsBoardHome = espnHomeKeys.has(bh) ||
+        [...espnHomeKeys].some((k) => k && (k.startsWith(bh) || bh.startsWith(k)));
+      return espnHomeIsBoardHome
+        ? { homeScore: espn.homeScore, awayScore: espn.awayScore }
+        : { homeScore: espn.awayScore, awayScore: espn.homeScore };
+    };
     const applyFinalScores = (games) =>
       games.map((game) => {
         const m = finalMatched.find((x) => x.game.id === game.id);
-        return m ? { ...game, homeScore: m.espn.homeScore, awayScore: m.espn.awayScore } : game;
+        if (!m) return game;
+        const { homeScore, awayScore } = espnScoresForBoard(game, m.espn);
+        return { ...game, homeScore, awayScore };
       });
 
     if (notFinal.length > 0) {
@@ -3062,7 +3076,7 @@ function LiveScorePanel({ game, data }) {
           {inProgress && (
             <span className="animate-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: "#e05050", display: "inline-block" }} />
           )}
-          {completed ? "■ FINAL" : inProgress ? "● LIVE" : ""}
+          {completed ? "■ FINAL" : inProgress ? "LIVE" : ""}
         </span>
         <span className="flex items-center gap-2" style={{ letterSpacing: "0.1em" }}>
           {coveringText && <span style={{ color: COLORS.muted }}>{coveringText}</span>}
@@ -5109,9 +5123,18 @@ async function fetchLiveGameDetails(week) {
         const period = status.period || 0;
         const completed = status.type?.completed === true;
 
+        // The board and ESPN can disagree on which team is home vs away (the
+        // matcher accepts a swapped orientation). Map ESPN's competitors to the
+        // BOARD's home/away by team name, so scores never land on the wrong side.
+        const boardHome = normalizeTeamName(game.home);
+        const espnHomeIsBoardHome =
+          ehKeys.has(boardHome) || looseHas(ehKeys, boardHome);
+        const boardHomeComp = espnHomeIsBoardHome ? homeComp : awayComp;
+        const boardAwayComp = espnHomeIsBoardHome ? awayComp : homeComp;
+
         liveData[game.id] = {
-          homeScore: homeComp.score ?? "—",
-          awayScore: awayComp.score ?? "—",
+          homeScore: boardHomeComp.score ?? "—",
+          awayScore: boardAwayComp.score ?? "—",
           completed,
           inProgress: !completed && period > 0,
           period,
@@ -5121,9 +5144,9 @@ async function fetchLiveGameDetails(week) {
             sit?.downDistanceText || sit?.shortDownDistanceText || "",
           isRedZone: sit?.isRedZone || false,
           possession:
-            possId === homeComp.id
+            possId === boardHomeComp.id
               ? "home"
-              : possId === awayComp.id
+              : possId === boardAwayComp.id
               ? "away"
               : null,
         };
