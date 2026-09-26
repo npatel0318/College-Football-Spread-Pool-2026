@@ -1264,10 +1264,10 @@ export default function App() {
     const gh = normalizeTeamName(game.home);
     const ga = normalizeTeamName(game.away);
     if (!gh || !ga) return null;
-    const loose = (set, target) => {
-      for (const k of set) { if (k === target || k.startsWith(target) || target.startsWith(k)) return true; }
-      return false;
-    };
+    // Exact-only loose check. We do NOT use startsWith here: "colorado state"
+    // starts with "colorado", which would mismatch Colorado State ↔ Colorado.
+    // Normalized exact matching plus the alias table handles real variants safely.
+    const loose = (set, target) => set.has(target);
 
     // Tier 1: both teams match exactly (any variant), correct orientation
     let m = espnGames.find((e) => espnHomeKeys(e).has(gh) && espnAwayKeys(e).has(ga));
@@ -1420,8 +1420,8 @@ export default function App() {
     const espnScoresForBoard = (game, espn) => {
       const bh = normalizeTeamName(game.home);
       const espnHomeKeys = new Set([espn.homeTeam, espn.homeLocation, espn.homeShort].map(normalizeTeamName).filter(Boolean));
-      const espnHomeIsBoardHome = espnHomeKeys.has(bh) ||
-        [...espnHomeKeys].some((k) => k && (k.startsWith(bh) || bh.startsWith(k)));
+      // Exact match only — no startsWith (would confuse Colorado/Colorado State).
+      const espnHomeIsBoardHome = espnHomeKeys.has(bh);
       return espnHomeIsBoardHome
         ? { homeScore: espn.homeScore, awayScore: espn.awayScore }
         : { homeScore: espn.awayScore, awayScore: espn.homeScore };
@@ -5020,11 +5020,6 @@ async function fetchUnderdogLive(pick, weekDates) {
     dates = [new Date().toISOString().slice(0, 10).replace(/-/g, "")];
   }
 
-  const looseHas = (set, target) => {
-    for (const k of set) { if (k === target || k.startsWith(target) || target.startsWith(k)) return true; }
-    return false;
-  };
-
   for (const yyyymmdd of dates) {
     try {
       const res = await fetch(
@@ -5043,15 +5038,20 @@ async function fetchUnderdogLive(pick, weekDates) {
         const ehKeys = new Set([homeComp.team?.displayName, homeComp.team?.location, homeComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
         const eaKeys = new Set([awayComp.team?.displayName, awayComp.team?.location, awayComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
 
-        // Determine if this is the underdog's game and which side the dog is on.
-        // Prefer a both-teams match (green); fall back to team-only.
+        // EXACT matching only. Prefix/startsWith matching is dangerous here because
+        // "colorado state" starts with "colorado" — it would bind Colorado State to
+        // Colorado's game. Since this drives money, we require exact normalized
+        // matches. When the opponent is provided, BOTH teams must agree.
         let underdogSide = null;
-        if (ehKeys.has(t) && o && eaKeys.has(o)) underdogSide = "home";
-        else if (eaKeys.has(t) && o && ehKeys.has(o)) underdogSide = "away";
-        else if (ehKeys.has(t)) underdogSide = "home";
-        else if (eaKeys.has(t)) underdogSide = "away";
-        else if (looseHas(ehKeys, t)) underdogSide = "home";
-        else if (looseHas(eaKeys, t)) underdogSide = "away";
+        if (o) {
+          // Opponent given → require both teams to match (either orientation)
+          if (ehKeys.has(t) && eaKeys.has(o)) underdogSide = "home";
+          else if (eaKeys.has(t) && ehKeys.has(o)) underdogSide = "away";
+        } else {
+          // No opponent → exact team match only, on either side
+          if (ehKeys.has(t)) underdogSide = "home";
+          else if (eaKeys.has(t)) underdogSide = "away";
+        }
         if (!underdogSide) continue;
 
         const status = comp.status;
@@ -5126,20 +5126,17 @@ async function fetchLiveGameDetails(week) {
         const ehKeys = new Set([homeComp.team?.displayName, homeComp.team?.location, homeComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
         const eaKeys = new Set([awayComp.team?.displayName, awayComp.team?.location, awayComp.team?.shortDisplayName].map(normalizeTeamName).filter(Boolean));
 
-        // Same safe matching as autoGrade: require both teams to agree, with a
-        // loose fallback. No home-only match here (live scores are cosmetic, so
-        // we'd rather show nothing than show the wrong game's score).
-        const looseHas = (set, target) => {
-          for (const k of set) { if (k === target || k.startsWith(target) || target.startsWith(k)) return true; }
-          return false;
-        };
+        // Same safe matching as autoGrade: both teams must agree exactly. We do
+        // NOT use startsWith — "colorado state" starts with "colorado" and would
+        // bind the wrong game. Normalized exact matching + aliases cover variants.
+        const looseHas = (set, target) => set.has(target);
         const game = games.find((g) => {
           const h = normalizeTeamName(g.home);
           const a = normalizeTeamName(g.away);
           if (ehKeys.has(h) && eaKeys.has(a)) return true;      // both exact
           if (ehKeys.has(a) && eaKeys.has(h)) return true;      // both exact, swapped
-          if (ehKeys.has(h) && looseHas(eaKeys, a)) return true; // home exact + away loose
-          if (looseHas(ehKeys, h) && eaKeys.has(a)) return true; // away exact + home loose
+          if (ehKeys.has(h) && looseHas(eaKeys, a)) return true; // home exact + away exact
+          if (looseHas(ehKeys, h) && eaKeys.has(a)) return true; // away exact + home exact
           return false;
         });
         if (!game) continue;
