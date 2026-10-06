@@ -1126,6 +1126,59 @@ export default function App() {
     return { membersFixed, picksRemoved };
   }
 
+  // Re-fetch display art (logos, colors, abbreviations, ranks) for a week's games
+  // from ESPN and update ONLY those cosmetic fields. Game IDs, teams, spreads, and
+  // kickoff are untouched — so picks and locks are completely unaffected. Fixes
+  // games that came in with missing/incorrect logos or abbreviations.
+  async function refreshGameArt(weekNum) {
+    const week = weekCache[weekNum];
+    if (!week?.weekDates?.from || !week?.weekDates?.to) return null;
+    let meta;
+    try {
+      meta = await fetchEspnGameMetadata(week.weekDates.from, week.weekDates.to);
+    } catch {
+      return null;
+    }
+    // Build a normalized-name -> team-art lookup from the ESPN metadata.
+    const artByName = {};
+    for (const [rawName, info] of Object.entries(meta.teams || {})) {
+      const key = normalizeTeamName(rawName);
+      if (key && !artByName[key]) artByName[key] = info;
+    }
+    let fixed = 0;
+    const newGames = week.games.map((g) => {
+      const homeArt = artByName[normalizeTeamName(g.home)];
+      const awayArt = artByName[normalizeTeamName(g.away)];
+      if (!homeArt && !awayArt) return g;
+      const updated = { ...g };
+      if (homeArt) {
+        if (homeArt.logo) updated.homeLogo = homeArt.logo;
+        if (homeArt.color) updated.homeColor = homeArt.color;
+        if (homeArt.abbreviation) updated.homeAbbr = homeArt.abbreviation;
+        if (homeArt.conference) updated.homeConf = homeArt.conference;
+        updated.homeRank = homeArt.rank ?? updated.homeRank ?? null;
+      }
+      if (awayArt) {
+        if (awayArt.logo) updated.awayLogo = awayArt.logo;
+        if (awayArt.color) updated.awayColor = awayArt.color;
+        if (awayArt.abbreviation) updated.awayAbbr = awayArt.abbreviation;
+        if (awayArt.conference) updated.awayConf = awayArt.conference;
+        updated.awayRank = awayArt.rank ?? updated.awayRank ?? null;
+      }
+      // Count as fixed only if something actually changed
+      const changed = ["homeLogo","awayLogo","homeAbbr","awayAbbr","homeColor","awayColor"]
+        .some((f) => updated[f] !== g[f]);
+      if (changed) fixed += 1;
+      return updated;
+    });
+    // Preserve everything else on the week doc, including picks-independent fields.
+    const payload = { ...week, games: newGames };
+    const r = await storage.set(`week:${weekNum}:games`, JSON.stringify(payload), true).catch(() => null);
+    if (!r) { setError("Couldn't refresh game art — try again."); return null; }
+    setWeekCache((prev) => ({ ...prev, [weekNum]: payload }));
+    return { fixed, total: week.games.length };
+  }
+
   async function addMember(name) {
     const slug = slugify(name);
     const existingTokens = leagueMeta.memberTokens || {};
@@ -2018,8 +2071,10 @@ export default function App() {
         let losses = 0;
         weekObj.games.forEach((g) => {
           const cover = coveringSide(g);
+          if (!cover || cover === "push") return; // undecided or push = neutral
           const pick = picksObj.picks[g.id];
-          if (!cover || cover === "push" || !pick) return;
+          // A missed pick on a decided game is an automatic loss.
+          if (!pick) { losses++; return; }
           if (pick === cover) wins++;
           else losses++;
         });
@@ -2658,6 +2713,7 @@ export default function App() {
             loadWeek={loadWeek}
             saveWeekGames={saveWeekGames}
             cleanOrphanedPicks={cleanOrphanedPicks}
+            refreshGameArt={refreshGameArt}
             toggleLock={toggleLock}
             toggleShowPicksEarly={toggleShowPicksEarly}
             toggleHidePicksUntilKickoff={toggleHidePicksUntilKickoff}
@@ -3885,9 +3941,16 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
     let wins = 0, losses = 0, lockResult = null;
 
     week.games.forEach((g) => {
-      const pick = memberPicks[g.id];
-      if (!pick || g.homeScore == null || g.awayScore == null) return;
+      const gameFinal = g.homeScore != null && g.awayScore != null;
+      if (!gameFinal) return; // not decided yet — stays pending
       const cover = coveringSide(g);
+      const pick = memberPicks[g.id];
+      // A missed pick on a FINAL game is an automatic loss (you can't un-miss it).
+      // A push is neutral for everyone, including non-pickers.
+      if (!pick) {
+        if (cover && cover !== "push") losses++;
+        return;
+      }
       if (!cover || cover === "push") return;
       if (pick === cover) wins++;
       else losses++;
@@ -4423,6 +4486,7 @@ function CommishTab({
   loadWeek,
   saveWeekGames,
   cleanOrphanedPicks,
+  refreshGameArt,
   toggleLock,
   toggleShowPicksEarly,
   toggleHidePicksUntilKickoff,
@@ -4708,6 +4772,7 @@ function CommishTab({
           loadWeek={loadWeek}
           saveWeekGames={saveWeekGames}
           cleanOrphanedPicks={cleanOrphanedPicks}
+          refreshGameArt={refreshGameArt}
           toggleLock={toggleLock}
           toggleShowPicksEarly={toggleShowPicksEarly}
           toggleHidePicksUntilKickoff={toggleHidePicksUntilKickoff}
@@ -5470,7 +5535,7 @@ function emptyGame() {
   };
 }
 
-function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrphanedPicks, toggleLock, toggleShowPicksEarly, toggleHidePicksUntilKickoff, deleteWeek }) {
+function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrphanedPicks, refreshGameArt, toggleLock, toggleShowPicksEarly, toggleHidePicksUntilKickoff, deleteWeek }) {
   const nextWeekNum = leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) + 1 : 1;
   const defaultYear = new Date().getFullYear();
 
@@ -5504,6 +5569,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrp
   const [confirmingGames, setConfirmingGames] = useState(null);
   const [cleaning, setCleaning] = useState(false);
   const [cleanNote, setCleanNote] = useState(null);
+  const [artFixing, setArtFixing] = useState(false);
+  const [artNote, setArtNote] = useState(null);
 
   // ── responsive layout (import panel) ─────────────────────────────────────
   const [isDesktop, setIsDesktop] = useState(typeof window !== "undefined" && window.innerWidth >= 768);
@@ -6068,6 +6135,36 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrp
             {cleaning ? "Checking picks…" : "Repair orphaned picks"}
           </button>
           {cleanNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{cleanNote}</span>}
+        </div>
+      )}
+
+      {/* ── Refresh logos/abbreviations from ESPN (does NOT touch picks) ── */}
+      {selectedWeek != null && currentWeekData && (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={async () => {
+              setArtFixing(true);
+              setArtNote(null);
+              const res = await refreshGameArt(selectedWeek);
+              setArtFixing(false);
+              if (res) {
+                setArtNote(
+                  res.fixed === 0
+                    ? "Logos & abbreviations already up to date."
+                    : `Updated logos/abbreviations on ${res.fixed} of ${res.total} games. Picks unaffected.`
+                );
+              } else {
+                setArtNote("Couldn't refresh from ESPN — try again.");
+              }
+            }}
+            disabled={artFixing}
+            className="cfb-mono text-xs flex items-center gap-1.5"
+            style={{ color: COLORS.chalkDim }}
+          >
+            <RefreshCw size={11} className={artFixing ? "animate-spin" : ""} />
+            {artFixing ? "Refreshing art…" : "Refresh logos & abbreviations"}
+          </button>
+          {artNote && <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{artNote}</span>}
         </div>
       )}
 
