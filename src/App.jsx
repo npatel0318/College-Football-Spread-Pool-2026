@@ -27,6 +27,7 @@ import {
   Flame,
   Zap,
   LayoutDashboard,
+  BarChart3,
   DollarSign,
   Send,
   Copy,
@@ -2173,6 +2174,77 @@ export default function App() {
     if (phase === "app" && activeTab === "standings") loadStandings();
   }, [phase, activeTab, loadStandings]);
 
+  // Compute detailed per-member stats across all graded weeks: lock record,
+  // underdog hit rate, ATS record, best/worst week, and best/worst team picks.
+  // Returns a map { memberName: stats }. Loaded on demand when viewing stats.
+  const [memberStats, setMemberStats] = useState(null);
+  const [memberStatsLoading, setMemberStatsLoading] = useState(false);
+  const loadMemberStats = useCallback(async () => {
+    if (!leagueMeta) return;
+    setMemberStatsLoading(true);
+    try {
+      const stats = {};
+      leagueMeta.members.forEach((m) => {
+        stats[m] = {
+          atsWins: 0, atsLosses: 0,
+          lockWins: 0, lockLosses: 0, lockPushes: 0,
+          udHits: 0, udMisses: 0,
+          weekRecords: [], // { week, wins, losses }
+          teamPicks: {},   // teamName -> { wins, losses }
+        };
+      });
+      for (const w of leagueMeta.weeks) {
+        const raw = await safeGet(`week:${w}:games`, true);
+        if (!raw) continue;
+        const weekObj = JSON.parse(raw);
+        if (!weekObj.graded) continue;
+        const gamesById = {};
+        weekObj.games.forEach((g) => (gamesById[g.id] = g));
+        const entries = await safeListValues(`week:${w}:picks:`, true);
+        for (const { key: k, value: raw2 } of entries) {
+          if (!raw2) continue;
+          const p = JSON.parse(raw2);
+          const member = p.name || slugToName[k.slice(`week:${w}:picks:`.length)];
+          if (!member || !stats[member]) continue;
+          const s = stats[member];
+          let wWins = 0, wLosses = 0;
+          weekObj.games.forEach((g) => {
+            const cover = coveringSide(g);
+            if (!cover || cover === "push") return;
+            const pick = p.picks?.[g.id];
+            if (!pick) { s.atsLosses++; wLosses++; return; } // missed = loss
+            // Which team did they pick?
+            const pickedTeam = pick === "home" ? g.home : g.away;
+            if (!s.teamPicks[pickedTeam]) s.teamPicks[pickedTeam] = { wins: 0, losses: 0 };
+            if (pick === cover) { s.atsWins++; wWins++; s.teamPicks[pickedTeam].wins++; }
+            else { s.atsLosses++; wLosses++; s.teamPicks[pickedTeam].losses++; }
+          });
+          s.weekRecords.push({ week: w, wins: wWins, losses: wLosses });
+          // Lock
+          if (p.lockedGameId) {
+            const lg = gamesById[p.lockedGameId];
+            if (lg) {
+              const cover = coveringSide(lg);
+              const lpick = p.picks?.[p.lockedGameId];
+              if (cover === "push") s.lockPushes++;
+              else if (cover && lpick) {
+                if (lpick === cover) s.lockWins++; else s.lockLosses++;
+              }
+            }
+          }
+          // Underdog
+          if (p.underdogResult === true) s.udHits++;
+          else if (p.underdogResult === false) s.udMisses++;
+        }
+      }
+      setMemberStats(stats);
+    } catch (e) {
+      console.error("loadMemberStats error", e);
+    } finally {
+      setMemberStatsLoading(false);
+    }
+  }, [leagueMeta, slugToName]);
+
   /* ---------- money ---------- */
 
   const loadMoneyData = useCallback(async () => {
@@ -2640,6 +2712,9 @@ export default function App() {
             onRefresh={loadStandings}
             moneyData={moneyData}
             loadMoneyData={loadMoneyData}
+            memberStats={memberStats}
+            memberStatsLoading={memberStatsLoading}
+            loadMemberStats={loadMemberStats}
           />
         )}
 
@@ -4384,13 +4459,19 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
   );
 }
 
-function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, loadMoneyData }) {
+function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, loadMoneyData, memberStats, memberStatsLoading, loadMemberStats }) {
+  const [statsMember, setStatsMember] = useState(null); // name being viewed, or null
   // Ensure money is loaded so the total-$ column is populated (money normally
   // only loads when the Money tab opens).
   useEffect(() => {
     if (!moneyData && loadMoneyData) loadMoneyData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moneyData]);
+  // Load detailed stats once, the first time someone opens a stats view.
+  useEffect(() => {
+    if (statsMember && !memberStats && !memberStatsLoading && loadMemberStats) loadMemberStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statsMember]);
 
   if (loading && !standings) return <Spinner label="Tallying the season..." />;
 
@@ -4446,7 +4527,16 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, lo
                   <td className="px-3 py-2" style={{ color: i === 0 ? COLORS.gold : COLORS.muted }}>
                     {i === 0 && r.totalWins > 0 ? <Trophy size={14} /> : i + 1}
                   </td>
-                  <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>{r.name}</td>
+                  <td className="px-3 py-2 font-semibold" style={{ color: COLORS.chalk }}>
+                    <button
+                      onClick={() => setStatsMember(r.name)}
+                      className="flex items-center gap-1"
+                      style={{ color: COLORS.chalk, textAlign: "left" }}
+                    >
+                      <span style={{ textDecoration: "underline", textDecorationColor: COLORS.line, textUnderlineOffset: 3 }}>{r.name}</span>
+                      <BarChart3 size={11} style={{ color: COLORS.muted, flexShrink: 0 }} />
+                    </button>
+                  </td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">{r.weeklyWins}-{r.weeklyLosses}</td>
                   {hasWinTotals && (
                     <td className="px-3 py-2 text-right whitespace-nowrap">{r.winTotalsWins.toFixed(2)}-{r.winTotalsLosses}</td>
@@ -4467,7 +4557,104 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, lo
           </table>
         </div>
       )}
-      <div className="text-xs" style={{ color: COLORS.muted }}>{gradedWeeks} week{gradedWeeks === 1 ? "" : "s"} on the board so far.</div>
+      <div className="text-xs" style={{ color: COLORS.muted }}>{gradedWeeks} week{gradedWeeks === 1 ? "" : "s"} on the board so far. Tap a name for their stats.</div>
+
+      {statsMember && (
+        <MemberStatsModal
+          name={statsMember}
+          stats={memberStats?.[statsMember]}
+          loading={memberStatsLoading || !memberStats}
+          onClose={() => setStatsMember(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function MemberStatsModal({ name, stats, loading, onClose }) {
+  // Derive display stats
+  const pct = (w, l) => (w + l === 0 ? "—" : `${Math.round((w / (w + l)) * 100)}%`);
+  const best = stats ? [...stats.weekRecords].sort((a, b) => b.wins - a.wins || a.losses - b.losses)[0] : null;
+  const worst = stats ? [...stats.weekRecords].sort((a, b) => a.wins - b.wins || b.losses - a.losses)[0] : null;
+  const teamList = stats
+    ? Object.entries(stats.teamPicks)
+        .map(([team, r]) => ({ team, ...r, total: r.wins + r.losses, pctNum: r.wins + r.losses ? r.wins / (r.wins + r.losses) : 0 }))
+        .filter((t) => t.total >= 2) // need a small sample to be meaningful
+    : [];
+  const hotTeams = [...teamList].sort((a, b) => b.pctNum - a.pctNum || b.total - a.total).slice(0, 3);
+  const coldTeams = [...teamList].sort((a, b) => a.pctNum - b.pctNum || b.total - a.total).slice(0, 3);
+
+  const Stat = ({ label, value, sub, color }) => (
+    <div style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep, padding: "10px 12px" }}>
+      <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.muted, letterSpacing: "0.05em" }}>{label}</div>
+      <div className="cfb-mono font-bold" style={{ fontSize: "1.3rem", color: color || COLORS.chalk, lineHeight: 1.2, marginTop: 2 }}>{value}</div>
+      {sub && <div className="cfb-mono text-xs" style={{ color: COLORS.muted }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 9999, display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="cfb-fade-in"
+        style={{ background: COLORS.fieldDark, border: `1px solid ${COLORS.lineStrong}`, borderBottom: "none", borderTopLeftRadius: 14, borderTopRightRadius: 14, width: "100%", maxWidth: 540, maxHeight: "85vh", overflowY: "auto", padding: "18px 16px calc(24px + env(safe-area-inset-bottom))" }}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <div className="cfb-display text-lg uppercase">{name}</div>
+          <button onClick={onClose} className="cfb-mono text-xs" style={{ color: COLORS.muted }}>close ✕</button>
+        </div>
+
+        {loading ? (
+          <Spinner label="Crunching the numbers..." />
+        ) : !stats ? (
+          <div className="text-sm" style={{ color: COLORS.muted }}>No stats yet.</div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-2">
+              <Stat label="ATS record" value={`${stats.atsWins}-${stats.atsLosses}`} sub={pct(stats.atsWins, stats.atsLosses)} color={COLORS.chalk} />
+              <Stat label="🔥 Lock record" value={`${stats.lockWins}-${stats.lockLosses}${stats.lockPushes ? `-${stats.lockPushes}` : ""}`} sub={pct(stats.lockWins, stats.lockLosses)} color={COLORS.goldBright} />
+              <Stat label="⚡ Underdog" value={`${stats.udHits}/${stats.udHits + stats.udMisses}`} sub={stats.udHits + stats.udMisses ? `${pct(stats.udHits, stats.udMisses)} hit` : "none yet"} color={COLORS.goldBright} />
+              <Stat label="Weeks played" value={stats.weekRecords.length} />
+            </div>
+
+            {best && worst && (
+              <div className="grid grid-cols-2 gap-2">
+                <Stat label="Best week" value={`${best.wins}-${best.losses}`} sub={`Week ${best.week}`} color={COLORS.goldBright} />
+                <Stat label="Worst week" value={`${worst.wins}-${worst.losses}`} sub={`Week ${worst.week}`} color={COLORS.redBright} />
+              </div>
+            )}
+
+            {(hotTeams.length > 0 || coldTeams.length > 0) && (
+              <div>
+                <div className="cfb-mono text-xs uppercase mb-2" style={{ color: COLORS.gold, letterSpacing: "0.05em" }}>Team picks (2+ games)</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep, padding: "8px 10px" }}>
+                    <div className="cfb-mono text-xs mb-1" style={{ color: "#3fae5a" }}>🟢 Hot</div>
+                    {hotTeams.map((t) => (
+                      <div key={t.team} className="cfb-mono text-xs flex justify-between" style={{ color: COLORS.chalkDim }}>
+                        <span className="truncate" style={{ maxWidth: 110 }}>{t.team}</span>
+                        <span style={{ color: COLORS.chalk }}>{t.wins}-{t.losses}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep, padding: "8px 10px" }}>
+                    <div className="cfb-mono text-xs mb-1" style={{ color: COLORS.redBright }}>🔴 Cold</div>
+                    {coldTeams.map((t) => (
+                      <div key={t.team} className="cfb-mono text-xs flex justify-between" style={{ color: COLORS.chalkDim }}>
+                        <span className="truncate" style={{ maxWidth: 110 }}>{t.team}</span>
+                        <span style={{ color: COLORS.chalk }}>{t.wins}-{t.losses}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
