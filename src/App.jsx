@@ -241,6 +241,184 @@ function underdogPayout(spread, settings) {
   return settings.underdogTier3Amount;
 }
 
+// Build the weekly recap story items from a graded week's data. Pure function:
+// takes the week (games+scores), the members' picks, the member list, and money
+// settings; returns an array of { emoji, label, text } story items. Only returns
+// items that have data (skips empties). Used on This Week + Standings tabs.
+function computeWeekRecap(week, weekPicks, members, settings) {
+  if (!week?.games?.length) return [];
+  const gamesFinal = week.games.filter((g) => g.homeScore != null && g.awayScore != null);
+  if (gamesFinal.length === 0) return [];
+  const abbr = (g, side) => (side === "home" ? (g.homeAbbr || teamAbbrev(g.home)) : (g.awayAbbr || teamAbbrev(g.away)));
+  const teamName = (g, side) => (side === "home" ? g.home : g.away);
+  const spreadNum = (g, side) => spreadLabel(g, side).num; // just the "+6.5"/"-3" string
+
+  // Per-member week record (ATS), using the same rules as standings
+  const memberRec = {}; // name -> { wins, losses }
+  const memberMoney = {}; // name -> net dollars for the week
+  members.forEach((m) => { memberRec[m] = { wins: 0, losses: 0 }; memberMoney[m] = 0; });
+
+  // Per-game pick tally for consensus/trap/hardest
+  const gameTally = {}; // gameId -> { home: n, away: n, cover, total }
+  week.games.forEach((g) => { gameTally[g.id] = { home: 0, away: 0, cover: coveringSide(g), total: 0 }; });
+
+  const items = [];
+
+  // Walk every member's picks
+  for (const m of members) {
+    const slug = slugify(m);
+    const p = weekPicks[slug];
+    if (!p) continue;
+    let w = 0, l = 0, money = 0;
+    week.games.forEach((g) => {
+      const cover = coveringSide(g);
+      if (!cover) return;
+      const pick = p.picks?.[g.id];
+      if (pick && gameTally[g.id]) { gameTally[g.id][pick]++; gameTally[g.id].total++; }
+      if (cover === "push") return;
+      if (!pick) { l++; money -= settings.weeklyLossAmount; return; }
+      if (pick === cover) { w++; money += settings.weeklyWinAmount; }
+      else { l++; money -= settings.weeklyLossAmount; }
+    });
+    // Lock money
+    if (p.lockedGameId) {
+      const lg = week.games.find((x) => x.id === p.lockedGameId);
+      if (lg) {
+        const cover = coveringSide(lg);
+        const lpick = p.picks?.[p.lockedGameId];
+        if (cover && cover !== "push" && lpick) {
+          money += lpick === cover ? settings.lockAmount : -settings.lockAmount;
+        }
+      }
+    }
+    // Underdog money
+    if (p.underdogResult === true && p.underdogPick) money += underdogPayout(p.underdogPick.spread || 0, settings);
+    memberRec[m] = { wins: w, losses: l };
+    memberMoney[m] = money;
+  }
+
+  const submitters = members.filter((m) => weekPicks[slugify(m)]?.picks && Object.keys(weekPicks[slugify(m)].picks).length > 0);
+
+  // 1) Week winner (best record) & Cellar Donkey (worst)
+  if (submitters.length > 0) {
+    const ranked = [...submitters].sort((a, b) => (memberRec[b].wins - memberRec[a].wins) || (memberRec[a].losses - memberRec[b].losses));
+    const top = ranked[0], bottom = ranked[ranked.length - 1];
+    items.push({ emoji: "🏆", label: "Week winner", text: `${top} went ${memberRec[top].wins}-${memberRec[top].losses}` });
+    if (ranked.length > 1) items.push({ emoji: "🫏", label: "Cellar Donkey", text: `${bottom} limped in at ${memberRec[bottom].wins}-${memberRec[bottom].losses}` });
+  }
+
+  // 2) Pick of the week (most popular pick) + result
+  let mostPopular = null;
+  week.games.forEach((g) => {
+    const t = gameTally[g.id];
+    const maxSide = t.home >= t.away ? "home" : "away";
+    const count = t[maxSide];
+    if (!mostPopular || count > mostPopular.count) mostPopular = { g, side: maxSide, count };
+  });
+  if (mostPopular && mostPopular.count > 0) {
+    const { g, side, count } = mostPopular;
+    const hit = g.homeScore != null && coveringSide(g) === side;
+    const result = coveringSide(g) == null ? "" : coveringSide(g) === "push" ? " · push" : hit ? " ✓ hit" : " ✗ lost";
+    items.push({ emoji: "📣", label: "Pick of the week", text: `${abbr(g, side)} ${spreadNum(g, side)} — ${count}/${submitters.length} took it${result}` });
+  }
+
+  // 3) Trap game (most people burned — popular pick that LOST)
+  let trap = null;
+  week.games.forEach((g) => {
+    const cover = coveringSide(g);
+    if (!cover || cover === "push") return;
+    const t = gameTally[g.id];
+    const wrongSide = cover === "home" ? "away" : "home";
+    const burned = t[wrongSide];
+    if (burned > 0 && (!trap || burned > trap.burned)) trap = { g, wrongSide, burned };
+  });
+  if (trap && trap.burned >= 2) {
+    items.push({ emoji: "🪤", label: "Trap game", text: `${trap.burned} got burned taking ${abbr(trap.g, trap.wrongSide)} ${spreadNum(trap.g, trap.wrongSide)}` });
+  }
+
+  // 4) Hardest & easiest game (by % of pickers who got it right)
+  const gameAccuracy = week.games
+    .map((g) => {
+      const cover = coveringSide(g);
+      const t = gameTally[g.id];
+      if (!cover || cover === "push" || t.total === 0) return null;
+      const right = t[cover];
+      return { g, cover, pct: right / t.total, total: t.total };
+    })
+    .filter(Boolean);
+  if (gameAccuracy.length > 0) {
+    const hardest = [...gameAccuracy].sort((a, b) => a.pct - b.pct)[0];
+    const easiest = [...gameAccuracy].sort((a, b) => b.pct - a.pct)[0];
+    items.push({ emoji: "🧠", label: "Hardest game", text: `Only ${Math.round(hardest.pct * 100)}% nailed ${abbr(hardest.g, hardest.cover)} ${spreadNum(hardest.g, hardest.cover)}` });
+    if (easiest.g.id !== hardest.g.id) items.push({ emoji: "🍰", label: "Easiest game", text: `${Math.round(easiest.pct * 100)}% cashed ${abbr(easiest.g, easiest.cover)} ${spreadNum(easiest.g, easiest.cover)}` });
+  }
+
+  // 5) Pool consensus accuracy (how the majority pick did)
+  let consW = 0, consL = 0;
+  gameAccuracy.forEach(({ g, cover }) => {
+    const t = gameTally[g.id];
+    if (t.total === 0) return;
+    const majoritySide = t.home >= t.away ? "home" : "away";
+    if (majoritySide === cover) consW++; else consL++;
+  });
+  if (consW + consL > 0) {
+    items.push({ emoji: "🗳️", label: "Consensus accuracy", text: `The pool's majority pick went ${consW}-${consL}` });
+  }
+
+  // 6) Lock heroes & casualties
+  const lockHeroes = [], lockCasualties = [];
+  for (const m of submitters) {
+    const p = weekPicks[slugify(m)];
+    if (!p?.lockedGameId) continue;
+    const lg = week.games.find((x) => x.id === p.lockedGameId);
+    if (!lg) continue;
+    const cover = coveringSide(lg);
+    const lpick = p.picks?.[p.lockedGameId];
+    if (!cover || cover === "push" || !lpick) continue;
+    if (lpick === cover) lockHeroes.push(m); else lockCasualties.push(m);
+  }
+  if (lockHeroes.length > 0) items.push({ emoji: "🔥", label: "Lock heroes", text: `${lockHeroes.join(", ")} nailed their lock` });
+  if (lockCasualties.length > 0) items.push({ emoji: "💥", label: "Lock casualties", text: `${lockCasualties.join(", ")} lost their lock` });
+
+  // 7) Underdog hitters
+  const udHitters = submitters.filter((m) => weekPicks[slugify(m)]?.underdogResult === true)
+    .map((m) => ({ m, pick: weekPicks[slugify(m)].underdogPick }));
+  if (udHitters.length > 0) {
+    items.push({ emoji: "⚡", label: "Underdog hitters", text: udHitters.map((x) => `${x.m} (${x.pick?.team} +${x.pick?.spread})`).join(", ") });
+  }
+
+  // 8) Contrarian hero (won a pick almost nobody else made)
+  let contrarian = null;
+  for (const m of submitters) {
+    const p = weekPicks[slugify(m)];
+    week.games.forEach((g) => {
+      const cover = coveringSide(g);
+      if (!cover || cover === "push") return;
+      const pick = p.picks?.[g.id];
+      if (pick !== cover) return; // only winning picks
+      const t = gameTally[g.id];
+      const howMany = t[pick];
+      if (howMany >= 1 && (!contrarian || howMany < contrarian.howMany)) {
+        contrarian = { m, g, side: pick, howMany };
+      }
+    });
+  }
+  if (contrarian && contrarian.howMany <= Math.max(2, Math.floor(submitters.length / 4))) {
+    const others = contrarian.howMany - 1;
+    items.push({ emoji: "🎯", label: "Contrarian hero", text: `${contrarian.m} won on ${abbr(contrarian.g, contrarian.side)} ${spreadNum(contrarian.g, contrarian.side)}${others === 0 ? " — nobody else had it" : ` — only ${contrarian.howMany} took it`}` });
+  }
+
+  // 9) Biggest money swing (up and down)
+  if (submitters.length > 0) {
+    const byMoney = [...submitters].sort((a, b) => memberMoney[b] - memberMoney[a]);
+    const up = byMoney[0], down = byMoney[byMoney.length - 1];
+    if (memberMoney[up] > 0) items.push({ emoji: "💰", label: "Biggest payday", text: `${up} banked +$${memberMoney[up].toFixed(2).replace(/\.00$/, "")}` });
+    if (memberMoney[down] < 0 && down !== up) items.push({ emoji: "📉", label: "Biggest loss", text: `${down} dropped −$${Math.abs(memberMoney[down]).toFixed(2).replace(/\.00$/, "")}` });
+  }
+
+  return items;
+}
+
 // Returns a Set of game IDs whose day's first kickoff has already passed.
 // Each game locks at its own scheduled kickoff time.
 // kickoffISO is stored as a UTC ISO string from the Odds API (e.g. "2025-09-06T19:30:00Z").
@@ -1261,7 +1439,23 @@ export default function App() {
       setError("Couldn't save results — try again.");
       return false;
     }
+    const wasGraded = weekCache[weekNum]?.graded === true;
     setWeekCache((prev) => ({ ...prev, [weekNum]: payload }));
+
+    // When a week BECOMES graded, snapshot the current standings order so future
+    // recaps can compute movement (biggest mover, lead changes, deltas). Stored
+    // once per week; harmless if it never gets read. Best-effort — ignore errors.
+    if (graded && !wasGraded) {
+      try {
+        if (standings) {
+          const order = Object.entries(standings)
+            .map(([name, s]) => ({ name, totalWins: s.totalWins ?? 0 }))
+            .sort((a, b) => b.totalWins - a.totalWins)
+            .map((x, idx) => ({ name: x.name, rank: idx + 1, totalWins: x.totalWins }));
+          await storage.set(`standings:snapshot:${weekNum}`, JSON.stringify({ week: weekNum, at: Date.now(), order }), true).catch(() => null);
+        }
+      } catch { /* non-fatal */ }
+    }
     return true;
   }
 
@@ -2245,6 +2439,37 @@ export default function App() {
     }
   }, [leagueMeta, slugToName]);
 
+  // Load the most recent graded week's games + picks so the Standings tab can
+  // show that week's recap. Returns { week, weekPicks } or null.
+  const [latestRecap, setLatestRecap] = useState(null);
+  const [latestRecapLoading, setLatestRecapLoading] = useState(false);
+  const loadLatestRecap = useCallback(async () => {
+    if (!leagueMeta?.weeks?.length) return;
+    setLatestRecapLoading(true);
+    try {
+      const weeksDesc = [...leagueMeta.weeks].sort((a, b) => b - a);
+      for (const w of weeksDesc) {
+        const raw = await safeGet(`week:${w}:games`, true);
+        if (!raw) continue;
+        const weekObj = JSON.parse(raw);
+        if (!weekObj.graded) continue;
+        const entries = await safeListValues(`week:${w}:picks:`, true);
+        const weekPicks = {};
+        for (const { key: k, value: raw2 } of entries) {
+          if (!raw2) continue;
+          const slug = k.slice(`week:${w}:picks:`.length);
+          try { weekPicks[slug] = JSON.parse(raw2); } catch {}
+        }
+        setLatestRecap({ week: weekObj, weekPicks });
+        break; // most recent graded week only
+      }
+    } catch (e) {
+      console.error("loadLatestRecap error", e);
+    } finally {
+      setLatestRecapLoading(false);
+    }
+  }, [leagueMeta]);
+
   /* ---------- money ---------- */
 
   const loadMoneyData = useCallback(async () => {
@@ -2715,6 +2940,8 @@ export default function App() {
             memberStats={memberStats}
             memberStatsLoading={memberStatsLoading}
             loadMemberStats={loadMemberStats}
+            latestRecap={latestRecap}
+            loadLatestRecap={loadLatestRecap}
           />
         )}
 
@@ -3975,6 +4202,31 @@ function UnderdogOfWeekCard({ weekNum, weekDates, locked, kickedOff, live, exist
   );
 }
 
+// Story-strip recap: emoji + label + detail, one row per stat. Screenshot-friendly.
+function WeekRecapStrip({ week, weekPicks, leagueMeta, title }) {
+  const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
+  const items = computeWeekRecap(week, weekPicks, leagueMeta.members, settings);
+  if (items.length === 0) return null;
+  return (
+    <div className="cfb-fade-in">
+      <div className="cfb-mono text-xs uppercase mb-2 flex items-center gap-1.5" style={{ color: COLORS.gold, letterSpacing: "0.08em" }}>
+        <BarChart3 size={12} /> {title || "Week recap"}
+      </div>
+      <div style={{ border: `1px solid ${COLORS.line}`, background: COLORS.fieldDeep }}>
+        {items.map((it, i) => (
+          <div key={i} className="flex items-start gap-3 px-3 py-2.5" style={{ borderTop: i === 0 ? "none" : `1px solid ${COLORS.line}` }}>
+            <span style={{ fontSize: "1.05rem", lineHeight: 1.2, flexShrink: 0 }}>{it.emoji}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="cfb-mono text-xs uppercase" style={{ color: COLORS.muted, letterSpacing: "0.05em" }}>{it.label}</div>
+              <div className="text-sm" style={{ color: COLORS.chalk }}>{it.text}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) {
   const members = leagueMeta.members;
   const settings = leagueMeta.moneySettings || DEFAULT_MONEY_SETTINGS;
@@ -4233,6 +4485,13 @@ function WeekLiveStandings({ leagueMeta, week, picksCache, lastAutoCheckTime }) 
           {totalGames - completedCount > 0 && `${totalGames - completedCount} game${totalGames - completedCount === 1 ? "" : "s"} still to play.`}
         </div>
       )}
+
+      {/* Weekly recap — shows once the week is graded */}
+      {week.graded && (
+        <div className="mt-4">
+          <WeekRecapStrip week={week} weekPicks={picksCache} leagueMeta={leagueMeta} title={`Week ${week.weekNum} recap`} />
+        </div>
+      )}
     </div>
   );
 }
@@ -4459,8 +4718,12 @@ function PicksGrid({ leagueMeta, week, picksCache, slugToName, hideUntilKickoff,
   );
 }
 
-function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, loadMoneyData, memberStats, memberStatsLoading, loadMemberStats }) {
+function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, loadMoneyData, memberStats, memberStatsLoading, loadMemberStats, latestRecap, loadLatestRecap }) {
   const [statsMember, setStatsMember] = useState(null); // name being viewed, or null
+  useEffect(() => {
+    if (!latestRecap && loadLatestRecap) loadLatestRecap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Ensure money is loaded so the total-$ column is populated (money normally
   // only loads when the Money tab opens).
   useEffect(() => {
@@ -4558,6 +4821,15 @@ function StandingsTab({ leagueMeta, standings, loading, onRefresh, moneyData, lo
         </div>
       )}
       <div className="text-xs" style={{ color: COLORS.muted }}>{gradedWeeks} week{gradedWeeks === 1 ? "" : "s"} on the board so far. Tap a name for their stats.</div>
+
+      {latestRecap?.week && (
+        <WeekRecapStrip
+          week={latestRecap.week}
+          weekPicks={latestRecap.weekPicks}
+          leagueMeta={leagueMeta}
+          title={`Week ${latestRecap.week.weekNum} recap`}
+        />
+      )}
 
       {statsMember && (
         <MemberStatsModal
