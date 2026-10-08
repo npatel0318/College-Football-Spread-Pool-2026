@@ -264,40 +264,78 @@ function computeWeekRecap(week, weekPicks, members, settings) {
 
   const items = [];
 
-  // Walk every member's picks
+  // Walk every member's picks to get records + tally picks per game.
+  // NOTE on money: weekly money is a WINNER-TAKES / LOSER-PAYS pool, NOT per-pick.
+  // Only the best record splits one weekly-win prize; only the worst record pays
+  // one weekly-loss amount. Everyone else is $0 for the week (plus their own
+  // lock ±lockAmount and underdog bonus). We compute records here, then apply the
+  // pool payout below so the recap money matches the real standings.
+  const submitted = new Set();
   for (const m of members) {
     const slug = slugify(m);
     const p = weekPicks[slug];
     if (!p) continue;
-    let w = 0, l = 0, money = 0;
+    const hasPicks = p.picks && Object.keys(p.picks).length > 0;
+    if (hasPicks) submitted.add(m);
+    let w = 0, l = 0;
     week.games.forEach((g) => {
       const cover = coveringSide(g);
       if (!cover) return;
       const pick = p.picks?.[g.id];
       if (pick && gameTally[g.id]) { gameTally[g.id][pick]++; gameTally[g.id].total++; }
       if (cover === "push") return;
-      if (!pick) { l++; money -= settings.weeklyLossAmount; return; }
-      if (pick === cover) { w++; money += settings.weeklyWinAmount; }
-      else { l++; money -= settings.weeklyLossAmount; }
+      if (!pick) { l++; return; }         // missed = loss
+      if (pick === cover) w++;
+      else l++;
     });
-    // Lock money
+    memberRec[m] = { wins: w, losses: l };
+  }
+
+  const submitters = [...submitted];
+
+  // ── Weekly pool payout (mirrors the real standings money logic) ──
+  if (submitters.length > 1) {
+    const recs = submitters.map((m) => ({ m, ...memberRec[m] }));
+    const maxWins = Math.max(...recs.map((r) => r.wins));
+    const minWins = Math.min(...recs.map((r) => r.wins));
+    if (maxWins > minWins) {
+      // Winners: best record split one prize (doubled on a perfect week)
+      const winners = recs.filter((r) => r.wins === maxWins);
+      const totalGamesCount = week.games.filter((g) => coveringSide(g)).length;
+      const perfect = maxWins === totalGamesCount && totalGamesCount > 0;
+      const winPool = perfect ? settings.weeklyWinAmount * 2 : settings.weeklyWinAmount;
+      const winShare = winPool / winners.length;
+      winners.forEach((r) => { memberMoney[r.m] = (memberMoney[r.m] || 0) + winShare; });
+      // Losers: worst record pays one loss amount (doubled if someone went 0-win)
+      const minLosers = recs.filter((r) => r.wins === minWins);
+      const maxLoss = Math.max(...minLosers.map((r) => r.losses));
+      const losers = minLosers.filter((r) => r.losses === maxLoss && r.wins !== maxWins);
+      if (losers.length > 0) {
+        const doubled = minWins === 0;
+        const lossPool = doubled ? settings.weeklyLossAmount * 2 : settings.weeklyLossAmount;
+        const lossShare = lossPool / losers.length;
+        losers.forEach((r) => { memberMoney[r.m] = (memberMoney[r.m] || 0) - lossShare; });
+      }
+    }
+  }
+
+  // Lock + underdog money apply to the individual regardless of pool placement.
+  for (const m of submitters) {
+    const p = weekPicks[slugify(m)];
     if (p.lockedGameId) {
       const lg = week.games.find((x) => x.id === p.lockedGameId);
       if (lg) {
         const cover = coveringSide(lg);
         const lpick = p.picks?.[p.lockedGameId];
         if (cover && cover !== "push" && lpick) {
-          money += lpick === cover ? settings.lockAmount : -settings.lockAmount;
+          memberMoney[m] = (memberMoney[m] || 0) + (lpick === cover ? settings.lockAmount : -settings.lockAmount);
         }
       }
     }
-    // Underdog money
-    if (p.underdogResult === true && p.underdogPick) money += underdogPayout(p.underdogPick.spread || 0, settings);
-    memberRec[m] = { wins: w, losses: l };
-    memberMoney[m] = money;
+    if (p.underdogResult === true && p.underdogPick) {
+      memberMoney[m] = (memberMoney[m] || 0) + underdogPayout(p.underdogPick.spread || 0, settings);
+    }
   }
-
-  const submitters = members.filter((m) => weekPicks[slugify(m)]?.picks && Object.keys(weekPicks[slugify(m)].picks).length > 0);
 
   // 1) Week winner (best record) & Cellar Donkey (worst)
   if (submitters.length > 0) {
