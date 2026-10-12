@@ -2642,6 +2642,31 @@ export default function App() {
     return true;
   }
 
+  // Commissioner override: write any subset of a member's pick document.
+  // Full override — no kickoff guards, no lock checks. Merges into existing doc
+  // so unrelated fields (underdogResult, etc.) are never clobbered.
+  // Changes: picks (a full { gameId: "home"|"away" } map), lockedGameId, underdogPick.
+  async function saveCommishPick(weekNum, memberName, changes) {
+    const slug = slugify(memberName);
+    const existing = picksCache[weekNum]?.[slug] || {};
+    const payload = {
+      ...existing,
+      name: memberName,
+      submittedAt: existing.submittedAt || Date.now(),
+      ...changes,
+    };
+    const r = await storage
+      .set(`week:${weekNum}:picks:${slug}`, JSON.stringify(payload), true)
+      .catch(() => null);
+    if (!r) { setError(`Couldn't save ${memberName}'s picks — try again.`); return false; }
+    setPicksCache((prev) => ({
+      ...prev,
+      [weekNum]: { ...(prev[weekNum] || {}), [slug]: payload },
+    }));
+    flashSaved();
+    return true;
+  }
+
   // Toggle whether a member has paid their entry fee for a given season year.
   // Stored as leagueMeta.entryFeesPaid = { [year]: { [memberSlug]: true } }
   async function toggleEntryFeePaid(year, memberSlug) {
@@ -3040,6 +3065,7 @@ export default function App() {
             passcodeInput={passcodeInput}
             picksCache={picksCache}
             saveUnderdogResults={saveUnderdogResults}
+            saveCommishPick={saveCommishPick}
             setPasscodeInput={setPasscodeInput}
             onUnlock={() => {
               if (passcodeInput === leagueMeta.commissionerPasscode) {
@@ -4977,6 +5003,7 @@ function CommishTab({
   passcodeInput,
   picksCache,
   saveUnderdogResults,
+  saveCommishPick,
   setPasscodeInput,
   onUnlock,
   weekCache,
@@ -5285,6 +5312,7 @@ function CommishTab({
           autoGradeWeek={autoGradeWeek}
           picksCache={picksCache}
           saveUnderdogResults={saveUnderdogResults}
+          saveCommishPick={saveCommishPick}
         />
       )}
       {mode === "wtBoard" && (
@@ -6848,14 +6876,22 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrp
 
 
 
-function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGradeWeek, picksCache, saveUnderdogResults }) {
+function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGradeWeek, picksCache, saveUnderdogResults, saveCommishPick }) {
   const [selectedWeek, setSelectedWeek] = useState(leagueMeta.weeks.length ? Math.max(...leagueMeta.weeks) : null);
   const [scores, setScores] = useState({});
   const [busy, setBusy] = useState(false);
-  const [autoStatus, setAutoStatus] = useState(null); // {status, message, ...}
+  const [autoStatus, setAutoStatus] = useState(null);
   const [autoRunning, setAutoRunning] = useState(false);
   const [udStatuses, setUdStatuses] = useState({});
   const [udBusy, setUdBusy] = useState(false);
+  // Commissioner pick editor state
+  const [editMember, setEditMember] = useState(null);  // member name being edited
+  const [editPicks, setEditPicks] = useState({});       // { gameId: "home"|"away" }
+  const [editLock, setEditLock] = useState(null);       // lockedGameId or null
+  const [editUdTeam, setEditUdTeam] = useState("");
+  const [editUdOpponent, setEditUdOpponent] = useState("");
+  const [editUdSpread, setEditUdSpread] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
   const week = selectedWeek != null ? weekCache[selectedWeek] : null;
   const weekPicks = selectedWeek != null ? picksCache[selectedWeek] || {} : {};
 
@@ -7150,6 +7186,204 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
               </div>
             </div>
           )}
+        {/* ── Commissioner pick editor ── */}
+        {week && (
+          <div className="space-y-2">
+            <div className="cfb-mono text-xs uppercase mt-2" style={{ color: COLORS.gold, letterSpacing: "0.06em" }}>
+              Edit a member's picks
+            </div>
+            <div className="text-xs" style={{ color: COLORS.muted }}>
+              Full override — no lock or kickoff restrictions. Choose a member to view and edit their picks, lock, and underdog for this week.
+            </div>
+
+            {/* Member selector */}
+            <div className="flex flex-wrap gap-1.5">
+              {leagueMeta.members.map((m) => {
+                const slug = slugify(m);
+                const hasPicks = weekPicks[slug]?.picks && Object.keys(weekPicks[slug].picks).length > 0;
+                const isEditing = editMember === m;
+                return (
+                  <button
+                    key={m}
+                    onClick={() => {
+                      if (isEditing) { setEditMember(null); return; }
+                      setEditMember(m);
+                      const p = weekPicks[slug] || {};
+                      setEditPicks({ ...(p.picks || {}) });
+                      setEditLock(p.lockedGameId || null);
+                      setEditUdTeam(p.underdogPick?.team || "");
+                      setEditUdOpponent(p.underdogPick?.opponent || "");
+                      setEditUdSpread(p.underdogPick?.spread != null ? String(p.underdogPick.spread) : "");
+                    }}
+                    className="cfb-mono text-xs px-2.5 py-1.5"
+                    style={{
+                      border: `1px solid ${isEditing ? COLORS.gold : COLORS.lineStrong}`,
+                      background: isEditing ? "rgba(217,164,65,0.12)" : COLORS.fieldDeep,
+                      color: isEditing ? COLORS.goldBright : hasPicks ? COLORS.chalk : COLORS.muted,
+                    }}
+                  >
+                    {m}{hasPicks ? "" : " (no picks)"}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Pick editor panel */}
+            {editMember && (
+              <div style={{ border: `1px solid ${COLORS.lineStrong}`, background: COLORS.fieldDeep, padding: "12px 14px" }} className="space-y-3">
+                <div className="cfb-mono text-xs font-bold" style={{ color: COLORS.goldBright }}>
+                  Editing: {editMember}
+                </div>
+
+                {/* Per-game spread picks */}
+                <div className="space-y-2">
+                  {week.games.map((g) => {
+                    const awayAbbr = g.awayAbbr || teamAbbrev(g.away);
+                    const homeAbbr = g.homeAbbr || teamAbbrev(g.home);
+                    const pick = editPicks[g.id];
+                    const isLock = editLock === g.id;
+                    return (
+                      <div key={g.id} style={{ borderBottom: `1px solid ${COLORS.line}`, paddingBottom: 8 }}>
+                        <div className="cfb-mono text-xs mb-1.5" style={{ color: COLORS.muted }}>
+                          {awayAbbr} @ {homeAbbr}
+                          {g.kickoffTime && <span style={{ marginLeft: 6 }}>{g.kickoffTime}</span>}
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {/* Away pick */}
+                          <button
+                            onClick={() => setEditPicks((prev) => {
+                              const next = { ...prev };
+                              if (next[g.id] === "away") delete next[g.id]; else next[g.id] = "away";
+                              return next;
+                            })}
+                            className="cfb-mono text-xs px-2.5 py-1"
+                            style={{
+                              border: `1px solid ${pick === "away" ? COLORS.gold : COLORS.lineStrong}`,
+                              background: pick === "away" ? "rgba(217,164,65,0.12)" : "transparent",
+                              color: pick === "away" ? COLORS.goldBright : COLORS.chalkDim,
+                            }}
+                          >
+                            {awayAbbr} {g.favorite === "away" ? `−${g.spread}` : `+${g.spread}`}
+                          </button>
+                          {/* Home pick */}
+                          <button
+                            onClick={() => setEditPicks((prev) => {
+                              const next = { ...prev };
+                              if (next[g.id] === "home") delete next[g.id]; else next[g.id] = "home";
+                              return next;
+                            })}
+                            className="cfb-mono text-xs px-2.5 py-1"
+                            style={{
+                              border: `1px solid ${pick === "home" ? COLORS.gold : COLORS.lineStrong}`,
+                              background: pick === "home" ? "rgba(217,164,65,0.12)" : "transparent",
+                              color: pick === "home" ? COLORS.goldBright : COLORS.chalkDim,
+                            }}
+                          >
+                            {homeAbbr} {g.favorite === "home" ? `−${g.spread}` : `+${g.spread}`}
+                          </button>
+                          {/* Lock toggle */}
+                          {pick && (
+                            <button
+                              onClick={() => setEditLock((prev) => prev === g.id ? null : g.id)}
+                              className="cfb-mono text-xs px-2 py-1 flex items-center gap-1"
+                              style={{
+                                border: `1px solid ${isLock ? COLORS.gold : COLORS.line}`,
+                                background: isLock ? "rgba(217,164,65,0.10)" : "transparent",
+                                color: isLock ? COLORS.goldBright : COLORS.muted,
+                              }}
+                            >
+                              <Flame size={10} />{isLock ? "lock ✓" : "set lock"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Underdog editor */}
+                <div>
+                  <div className="cfb-mono text-xs mb-1.5" style={{ color: COLORS.muted }}>Underdog pick (optional)</div>
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <input
+                      value={editUdTeam}
+                      onChange={(e) => setEditUdTeam(e.target.value)}
+                      placeholder="Underdog team"
+                      className="cfb-mono text-xs px-2 py-1.5"
+                      style={{ background: COLORS.fieldDark, border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalk, width: 140 }}
+                    />
+                    <input
+                      value={editUdSpread}
+                      onChange={(e) => setEditUdSpread(e.target.value)}
+                      placeholder="+spread"
+                      type="number"
+                      step="0.5"
+                      className="cfb-mono text-xs px-2 py-1.5"
+                      style={{ background: COLORS.fieldDark, border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalk, width: 72 }}
+                    />
+                    <input
+                      value={editUdOpponent}
+                      onChange={(e) => setEditUdOpponent(e.target.value)}
+                      placeholder="vs opponent"
+                      className="cfb-mono text-xs px-2 py-1.5"
+                      style={{ background: COLORS.fieldDark, border: `1px solid ${COLORS.lineStrong}`, color: COLORS.chalk, width: 140 }}
+                    />
+                    {(editUdTeam || editUdOpponent || editUdSpread) && (
+                      <button
+                        onClick={() => { setEditUdTeam(""); setEditUdOpponent(""); setEditUdSpread(""); }}
+                        className="cfb-mono text-xs"
+                        style={{ color: COLORS.muted }}
+                      >
+                        clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Save / cancel */}
+                <div className="flex gap-2 items-center pt-1">
+                  <button
+                    disabled={editSaving}
+                    onClick={async () => {
+                      setEditSaving(true);
+                      const udSpreadNum = Number(editUdSpread);
+                      const underdogPick = editUdTeam.trim()
+                        ? { team: editUdTeam.trim(), opponent: editUdOpponent.trim(), spread: isNaN(udSpreadNum) ? 0 : udSpreadNum }
+                        : null;
+                      // Preserve existing underdog result/confidence if the pick team/opponent didn't change
+                      const slug = slugify(editMember);
+                      const existing = weekPicks[slug] || {};
+                      const existingUd = existing.underdogPick;
+                      const udUnchanged = underdogPick && existingUd && underdogPick.team === existingUd.team && underdogPick.opponent === existingUd.opponent;
+                      const changes = {
+                        picks: editPicks,
+                        lockedGameId: editLock,
+                        underdogPick: underdogPick,
+                        // Clear auto-scored result if the underdog changed, keep if unchanged
+                        ...(underdogPick && !udUnchanged ? { underdogResult: null, underdogResultManual: false, underdogAutoConfidence: null } : {}),
+                        ...(underdogPick === null ? { underdogResult: null, underdogResultManual: false } : {}),
+                      };
+                      const ok = await saveCommishPick(selectedWeek, editMember, changes);
+                      setEditSaving(false);
+                      if (ok) setEditMember(null);
+                    }}
+                    className="cfb-mono cfb-btn text-xs px-3 py-2"
+                    style={{ border: `1px solid ${COLORS.gold}`, color: COLORS.goldBright }}
+                  >
+                    {editSaving ? "Saving…" : `Save ${editMember}'s picks`}
+                  </button>
+                  <button
+                    onClick={() => setEditMember(null)}
+                    className="cfb-mono text-xs"
+                    style={{ color: COLORS.muted }}
+                  >
+                    cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
         </>
       )}
     </div>
