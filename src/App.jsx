@@ -2795,20 +2795,20 @@ export default function App() {
     const now = Date.now();
     if (now - lastCheckTimeRef.current < COOLDOWN_MS) return;
 
-    // Find weeks that are ungraded and cached. We do NOT require week.locked —
-    // this pool locks games individually at kickoff, so grading is driven by
-    // per-game finality (handled inside autoGradeWeek), not a week-level lock.
-    const weeksToGrade = leagueMeta.weeks.filter((w) => {
-      const c = weekCache[w];
-      return c && !c.graded;
-    });
-    if (!weeksToGrade.length) return;
+    // Grading: ungraded weeks only (autoGradeWeek is a no-op on graded weeks).
+    // Underdog scoring: run on ALL cached weeks — underdog games can finish AFTER
+    // the slate grades, so limiting to ungraded weeks causes missed auto-scores.
+    const cachedWeeks = leagueMeta.weeks.filter((w) => weekCache[w]);
+    const ungradedWeeks = cachedWeeks.filter((w) => !weekCache[w].graded);
+    if (!cachedWeeks.length) return;
 
     checkInProgressRef.current = true;
     lastCheckTimeRef.current = now;
     setLastAutoCheckTime(now);
-    for (const w of weeksToGrade) {
+    for (const w of ungradedWeeks) {
       await autoGradeWeek(w);
+    }
+    for (const w of cachedWeeks) {
       await autoScoreUnderdogs(w);
     }
     checkInProgressRef.current = false;
@@ -6933,7 +6933,9 @@ function ResultsManager({ leagueMeta, weekCache, loadWeek, saveResults, autoGrad
     setAutoStatus({ status: "running", message: "Reloading week and fetching scores from ESPN..." });
     await loadWeek(selectedWeek, true); // refresh week data first
     const result = await autoGradeWeek(selectedWeek);
-    // Surface not-locked explicitly so it isn't a silent no-op
+    // Also attempt underdog auto-scoring on demand — underdog games may finish
+    // after the slate grades, and the background trigger only covers ungraded weeks.
+    await autoScoreUnderdogs(selectedWeek);
     if (result?.status === "not-locked") {
       setAutoStatus({ status: "not-locked", message: "This week isn't locked yet — lock it in Manage games, then grade." });
     } else {
