@@ -337,12 +337,19 @@ function computeWeekRecap(week, weekPicks, members, settings) {
     }
   }
 
-  // 1) Week winner (best record) & Cellar Donkey (worst)
+  // 1) Week winner (best record) & Cellar Donkey (worst) — show ALL tied names
   if (submitters.length > 0) {
     const ranked = [...submitters].sort((a, b) => (memberRec[b].wins - memberRec[a].wins) || (memberRec[a].losses - memberRec[b].losses));
-    const top = ranked[0], bottom = ranked[ranked.length - 1];
-    items.push({ emoji: "🏆", label: "Week winner", text: `${top} went ${memberRec[top].wins}-${memberRec[top].losses}` });
-    if (ranked.length > 1) items.push({ emoji: "🫏", label: "Cellar Donkey", text: `${bottom} limped in at ${memberRec[bottom].wins}-${memberRec[bottom].losses}` });
+    const bestWins = memberRec[ranked[0]].wins;
+    const bestLosses = memberRec[ranked[0]].losses;
+    const winners = ranked.filter((m) => memberRec[m].wins === bestWins && memberRec[m].losses === bestLosses);
+    const worstWins = memberRec[ranked[ranked.length - 1]].wins;
+    const worstLosses = memberRec[ranked[ranked.length - 1]].losses;
+    const donkeys = ranked.filter((m) => memberRec[m].wins === worstWins && memberRec[m].losses === worstLosses);
+    items.push({ emoji: "🏆", label: winners.length > 1 ? "Week winners" : "Week winner", text: `${winners.join(", ")} went ${bestWins}-${bestLosses}` });
+    if (ranked.length > 1 && !(winners.length === ranked.length)) {
+      items.push({ emoji: "🫏", label: donkeys.length > 1 ? "Cellar Donkeys" : "Cellar Donkey", text: `${donkeys.join(", ")} limped in at ${worstWins}-${worstLosses}` });
+    }
   }
 
   // 2) Pick of the week (most popular pick) + result
@@ -449,9 +456,13 @@ function computeWeekRecap(week, weekPicks, members, settings) {
   // 9) Biggest money swing (up and down)
   if (submitters.length > 0) {
     const byMoney = [...submitters].sort((a, b) => memberMoney[b] - memberMoney[a]);
-    const up = byMoney[0], down = byMoney[byMoney.length - 1];
-    if (memberMoney[up] > 0) items.push({ emoji: "💰", label: "Biggest payday", text: `${up} banked +$${memberMoney[up].toFixed(2).replace(/\.00$/, "")}` });
-    if (memberMoney[down] < 0 && down !== up) items.push({ emoji: "📉", label: "Biggest loss", text: `${down} dropped −$${Math.abs(memberMoney[down]).toFixed(2).replace(/\.00$/, "")}` });
+    const topAmt = memberMoney[byMoney[0]];
+    const botAmt = memberMoney[byMoney[byMoney.length - 1]];
+    const topEarners = byMoney.filter((m) => memberMoney[m] === topAmt);
+    const topLosers  = byMoney.filter((m) => memberMoney[m] === botAmt);
+    const fmt = (n) => `$${Math.abs(n).toFixed(2).replace(/\.00$/, "")}`;
+    if (topAmt > 0) items.push({ emoji: "💰", label: topEarners.length > 1 ? "Biggest paydays" : "Biggest payday", text: `${topEarners.join(", ")} banked +${fmt(topAmt)}` });
+    if (botAmt < 0 && botAmt !== topAmt) items.push({ emoji: "📉", label: topLosers.length > 1 ? "Biggest losses" : "Biggest loss", text: `${topLosers.join(", ")} dropped −${fmt(botAmt)}` });
   }
 
   return items;
