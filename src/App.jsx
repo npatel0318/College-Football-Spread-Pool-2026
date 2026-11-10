@@ -147,6 +147,60 @@ function winTotalCover(team) {
   return "push";
 }
 
+// "3-1 · 8 left" from the team's stored live record, or null if we have none yet.
+function winTotalRecordText(team) {
+  const rec = team?.liveRecord;
+  if (!rec || !rec.scheduled) return null;
+  const left = Math.max(0, rec.scheduled - rec.completed);
+  return `${rec.wins}-${rec.losses} · ${left} left`;
+}
+
+// Status of one member's pick on a team. `side` is "over" | "under" | null.
+//   Clinched ✓  = pick is mathematically decided in the member's favor (early)
+//   Eliminated ✕ = pick can no longer hit (decided against the member, early)
+//   Won ✓ / Lost ✕ = season finished and the result is final
+//   Alive       = still possible either way
+function winTotalPickStatus(team, side) {
+  if (!team) return null;
+  const cover = winTotalCover(team);
+  if (cover === "push") return { kind: "push", label: "Push" };
+  if (cover) {
+    if (!side) return null;
+    const won = cover === side;
+    if (team.clinchedEarly) return { kind: won ? "won" : "lost", label: won ? "Clinched ✓" : "Eliminated ✕" };
+    return { kind: won ? "won" : "lost", label: won ? "Won ✓" : "Lost ✕" };
+  }
+  if (!side) return null;
+  // Whole-number lines only: a pick can be unable to WIN yet not fully decided
+  // (the best it can do is push). Half-point lines never land here.
+  const rec = team.liveRecord;
+  const line = Number(team.line);
+  if (rec && rec.scheduled && Number.isInteger(line)) {
+    const maxWins = rec.wins + Math.max(0, rec.scheduled - rec.completed);
+    if (side === "over" && maxWins === line) return { kind: "push", label: "Push at best" };
+    if (side === "under" && rec.wins === line) return { kind: "push", label: "Push at best" };
+  }
+  return { kind: "alive", label: "Alive" };
+}
+
+const WT_STATUS_COLORS = { won: "#3fae5a", lost: "#d1483f", push: "#8a8a80", alive: "#b8b8ae" };
+
+function WtStatusBadge({ status }) {
+  const c = WT_STATUS_COLORS[status.kind];
+  return (
+    <span
+      className="cfb-mono"
+      style={{
+        fontSize: "0.65rem", fontWeight: 700, letterSpacing: "0.04em", padding: "2px 8px",
+        borderRadius: 10, border: `1px solid ${c}`, color: c, whiteSpace: "nowrap",
+        background: status.kind === "won" ? "rgba(63,174,90,0.12)" : status.kind === "lost" ? "rgba(209,72,63,0.12)" : "transparent",
+      }}
+    >
+      {status.label}
+    </span>
+  );
+}
+
 // Given a team's live record, determine its final win total OR whether the
 // over/under is already mathematically clinched.
 // record = { wins, losses, scheduled, completed }
@@ -1990,25 +2044,45 @@ export default function App() {
     } catch {
       return null;
     }
+    // Re-read the board RIGHT before writing. Any member's device can run this, so
+    // writing back a stale cached board would overwrite lines/odds the commissioner
+    // edited in the meantime. We merge ONLY finalWins / clinchedEarly / liveRecord
+    // into whatever is currently stored, and run the clinch math on fresh lines.
+    let base = board;
+    try {
+      const rawFresh = await safeGet(`wintotals:${year}:board`, true);
+      if (rawFresh) base = JSON.parse(rawFresh);
+    } catch { /* fall back to cached board */ }
+
+    const sameRec = (a, b) =>
+      !!a && !!b && a.wins === b.wins && a.losses === b.losses && a.scheduled === b.scheduled && a.completed === b.completed;
+
     let updated = 0;
-    const newTeams = board.teams.map((team) => {
+    let changed = false;
+    const newTeams = base.teams.map((team) => {
       if (team.manualFinal) return team; // respect manual override
       const rec = records[normalizeTeamName(team.school)];
       if (!rec) return team;
       const { finalWins, clinched } = winTotalClinch(Number(team.line), rec);
+      const next = { ...team, liveRecord: rec };
       if (finalWins != null && finalWins !== team.finalWins) {
         updated++;
-        return { ...team, finalWins, clinchedEarly: clinched, liveRecord: rec };
+        next.finalWins = finalWins;
+        next.clinchedEarly = clinched;
+        changed = true;
+      } else if (finalWins != null && team.clinchedEarly !== clinched) {
+        next.clinchedEarly = clinched; // e.g. season completed after an early clinch
+        changed = true;
       }
-      // Store live record even if not yet decided (for display)
-      return { ...team, liveRecord: rec };
+      if (!sameRec(team.liveRecord, rec)) changed = true;
+      return next;
     });
-    if (updated > 0 || newTeams.some((t, i) => t.liveRecord !== board.teams[i].liveRecord)) {
-      const payload = { ...board, teams: newTeams };
+    if (changed) {
+      const payload = { ...base, teams: newTeams };
       const r = await storage.set(`wintotals:${year}:board`, JSON.stringify(payload), true).catch(() => null);
       if (r) setWinTotalsCache((prev) => ({ ...prev, [year]: payload }));
     }
-    return { updated, checked: board.teams.length };
+    return { updated, checked: base.teams.length };
   }
 
   // Preview which board teams match an ESPN team record (by name) and which don't.
@@ -2025,11 +2099,20 @@ export default function App() {
     }
     const matched = [];
     const unmatched = [];
+    // FBS teams normally play 12 regular-season games (13 with a Week 0 / extra game).
+    // Anything else means ESPN's schedule data is incomplete or a game moved, which
+    // would make the "games left" math (and early clinches) wrong for that team.
+    const oddCounts = [];
     board.teams.forEach((team) => {
-      if (records[normalizeTeamName(team.school)]) matched.push(team.school);
-      else unmatched.push(team.school);
+      const rec = records[normalizeTeamName(team.school)];
+      if (rec) {
+        matched.push(team.school);
+        if (rec.scheduled !== 12 && rec.scheduled !== 13) oddCounts.push({ school: team.school, scheduled: rec.scheduled });
+      } else {
+        unmatched.push(team.school);
+      }
     });
-    return { matched, unmatched, total: board.teams.length };
+    return { matched, unmatched, oddCounts, total: board.teams.length };
   }
 
   const loadPlayoff = useCallback(async (year, withPicks) => {
@@ -7684,9 +7767,26 @@ function WinTotalsTab({ leagueMeta, selectedYear, setSelectedYear, board, loadin
                   })}
                 </div>
               )}
+              {team && (() => {
+                const recText = winTotalRecordText(team);
+                const st = winTotalPickStatus(team, sel.side);
+                if (!recText && !st) return null;
+                return (
+                  <div className="flex items-center justify-between gap-2 mt-2">
+                    <span className="cfb-mono text-xs" style={{ color: COLORS.muted }}>
+                      {recText ? `record ${recText}` : ""}
+                    </span>
+                    {st && <WtStatusBadge status={st} />}
+                  </div>
+                );
+              })()}
               {team && team.finalWins != null && (
                 <div className="cfb-mono text-xs mt-1.5" style={{ color: COLORS.muted }}>
-                  final: {team.finalWins} wins{winTotalCover(team) === "push" ? " (push)" : ""}
+                  {team.clinchedEarly
+                    ? (winTotalCover(team) === "over"
+                        ? `over ${team.line} clinched — already at ${team.finalWins} wins`
+                        : `under ${team.line} clinched — can't get past ${team.finalWins} wins`)
+                    : `final: ${team.finalWins} wins${winTotalCover(team) === "push" ? " (push)" : ""}`}
                 </div>
               )}
             </div>
@@ -7794,6 +7894,18 @@ function WinTotalsGrid({ leagueMeta, board, picksCache, slugToName }) {
                               ? "push · 0"
                               : `+${pickPayout(team, pick.side).toFixed(2)} if hit`}
                           </div>
+                          {(() => {
+                            const rt = winTotalRecordText(team);
+                            const st = winTotalPickStatus(team, pick.side);
+                            if (!rt && !st) return null;
+                            return (
+                              <div style={{ fontSize: "0.6rem", marginTop: 1, color: COLORS.muted }}>
+                                {rt}
+                                {rt && st ? " · " : ""}
+                                {st && <span style={{ color: WT_STATUS_COLORS[st.kind], fontWeight: 700 }}>{st.label}</span>}
+                              </div>
+                            );
+                          })()}
                         </>
                       ) : "—"}
                     </td>
@@ -8185,6 +8297,22 @@ function WinTotalsResultsManager({ leagueMeta, winTotalsCache, loadWinTotals, sa
                   <div className="text-xs" style={{ color: COLORS.muted }}>
                     Every team matched — auto-grading will cover the whole board.
                   </div>
+                )}
+                {matchResult.oddCounts && matchResult.oddCounts.length > 0 ? (
+                  <div className="pt-1.5" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                    <div className="text-xs" style={{ color: COLORS.chalk }}>
+                      {matchResult.oddCounts.length} team{matchResult.oddCounts.length === 1 ? "" : "s"} with an unusual game count (expected 12–13). "Games left" and early clinches may be off for these until ESPN's schedule is complete — use manual override if needed:
+                    </div>
+                    <div className="cfb-mono text-xs" style={{ color: COLORS.goldBright }}>
+                      {matchResult.oddCounts.map((t) => `${t.school} (${t.scheduled})`).join(", ")}
+                    </div>
+                  </div>
+                ) : (
+                  matchResult.oddCounts && (
+                    <div className="text-xs" style={{ color: COLORS.muted }}>
+                      Schedule check: every matched team shows 12–13 games.
+                    </div>
+                  )
                 )}
               </div>
             )}
