@@ -3993,13 +3993,15 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       const pickWon = showBadge && myPick === cover;
                       const teamColor = side === "home" ? g.homeColor : g.awayColor;
                       const teamLogo = side === "home" ? g.homeLogo : g.awayLogo;
-                      // Dark logo (e.g. Iowa) -> light backdrop in the team's secondary color
+                      // Dark logo (e.g. Iowa, Texas A&M): use the team's OTHER color for the
+                      // box tint/border instead of its dark primary, so the box keeps the same
+                      // see-through look as every other team. `plate` is that other color.
                       const storedAlt = side === "home" ? g.homeAltColor : g.awayAltColor;
                       const altColor = storedAlt || espnAlt[normalizeTeamName(side === "home" ? g.home : g.away)] || null;
                       const plate = logoPlateColor(teamColor, altColor, side === "home" ? g.homeAbbr : g.awayAbbr);
-                      const plateInk = "#101012";
+                      const tintColor = plate || teamColor;
 
-                      // Background and border logic
+                      // Background and border logic (identical for every team; only the tint color differs)
                       let bg, borderColor, borderWidth = "1px";
                       if (week.graded) {
                         if (isCorrect) {
@@ -4009,26 +4011,22 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                           bg = "rgba(179,55,42,0.18)";
                           borderColor = COLORS.red;
                         } else {
-                          bg = hexToRgba(teamColor, 0.07);
-                          borderColor = hexToRgba(teamColor, 0.25);
+                          bg = hexToRgba(tintColor, 0.07);
+                          borderColor = hexToRgba(tintColor, 0.25);
                         }
                       } else if (isPicked) {
-                        bg = hexToRgba(teamColor, 0.22);
-                        borderColor = teamColor || COLORS.gold;
+                        bg = hexToRgba(tintColor, 0.22);
+                        borderColor = tintColor || COLORS.gold;
                         borderWidth = "2px";
                       } else {
-                        bg = hexToRgba(teamColor, 0.06);
-                        borderColor = hexToRgba(teamColor, 0.3);
+                        bg = hexToRgba(tintColor, 0.06);
+                        borderColor = hexToRgba(tintColor, 0.3);
                       }
-                      if (plate) {
-                        // Keep the light backdrop in every state so the logo stays visible;
-                        // state is carried by the border (and the WON/LOST badge) instead.
-                        bg = plate;
-                        if (week.graded && isCorrect) { borderColor = COLORS.gold; borderWidth = "3px"; }
-                        else if (week.graded && isPicked && isWrong) { borderColor = COLORS.red; borderWidth = "3px"; }
-                        else if (isPicked) { borderColor = COLORS.chalk; borderWidth = "3px"; }
-                        else { borderColor = "rgba(0,0,0,0.3)"; borderWidth = "1px"; }
-                      }
+                      // A faint tint can't lift a black logo off a dark box by itself, so dark
+                      // logos also get a thin outline + soft glow in that same other color.
+                      const logoHalo = plate
+                        ? ` drop-shadow(1px 0 0 ${plate}) drop-shadow(-1px 0 0 ${plate}) drop-shadow(0 1px 0 ${plate}) drop-shadow(0 -1px 0 ${plate}) drop-shadow(0 0 5px ${hexToRgba(plate, 0.55)})`
+                        : "";
 
                       return (
                         <button
@@ -4088,7 +4086,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                                 fontSize: "0.58rem",
                                 letterSpacing: "0.07em",
                                 textTransform: "uppercase",
-                                color: plate ? "rgba(16,16,18,0.65)" : (isPicked ? COLORS.goldBright : COLORS.muted),
+                                color: isPicked ? COLORS.goldBright : COLORS.muted,
                                 opacity: 0.9,
                               }}
                             >
@@ -4105,7 +4103,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                                 objectFit: "contain",
                                 marginBottom: 6,
                                 opacity: isPicked || !myPick ? 1 : 0.7,
-                                filter: isOtherPicked ? "grayscale(0.5)" : "none",
+                                filter: ((isOtherPicked ? "grayscale(0.5)" : "") + logoHalo).trim() || "none",
                               }}
                               onError={(e) => { e.target.style.display = "none"; }}
                             />
@@ -4124,10 +4122,10 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                               {lbl.team.slice(0, 3).toUpperCase()}
                             </div>
                           )}
-                          <span className="text-xs font-semibold leading-tight w-full" style={{ color: plate ? plateInk : COLORS.chalk }}>
+                          <span className="text-xs font-semibold leading-tight w-full" style={{ color: COLORS.chalk }}>
                             {lbl.team}
                           </span>
-                          <span className="cfb-mono text-xs mt-0.5" style={{ color: plate ? plateInk : COLORS.goldBright, fontWeight: plate ? 700 : undefined }}>
+                          <span className="cfb-mono text-xs mt-0.5" style={{ color: COLORS.goldBright }}>
                             {lbl.num}
                           </span>
                         </button>
