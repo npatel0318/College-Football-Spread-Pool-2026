@@ -3692,6 +3692,34 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
     return () => { stale = true; clearInterval(udLiveTimerRef.current); };
   }, [selectedWeek, myUdPickForLive?.team, myUdPickForLive?.opponent]); // eslint-disable-line
 
+  // Secondary (alternate) team colors for dark-logo backdrops. Games imported before
+  // we stored them don't have one, so look them up from ESPN in memory — no writes,
+  // no commissioner step. Only runs when a dark-logo team is missing its stored color.
+  const [espnAlt, setEspnAlt] = useState({}); // normalized team name -> "#rrggbb"
+  useEffect(() => {
+    if (!week?.weekDates?.from || !week?.weekDates?.to || !week?.games?.length) return;
+    const needs = week.games.some(
+      (g) =>
+        (!g.homeAltColor && logoPlateColor(g.homeColor, null, g.homeAbbr)) ||
+        (!g.awayAltColor && logoPlateColor(g.awayColor, null, g.awayAbbr))
+    );
+    if (!needs) return;
+    let stale = false;
+    fetchEspnGameMetadata(week.weekDates.from, week.weekDates.to)
+      .then((meta) => {
+        if (stale) return;
+        const map = {};
+        for (const [rawName, info] of Object.entries(meta.teams || {})) {
+          const k = normalizeTeamName(rawName);
+          if (k && info.altColor && !map[k]) map[k] = info.altColor;
+        }
+        setEspnAlt(map);
+      })
+      .catch(() => {});
+    return () => { stale = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWeek, week?.weekDates?.from, week?.weekDates?.to, week?.games?.length]);
+
   // --- early returns after all hooks ---
 
   if (selectedWeek == null) {
@@ -3966,7 +3994,9 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       const teamColor = side === "home" ? g.homeColor : g.awayColor;
                       const teamLogo = side === "home" ? g.homeLogo : g.awayLogo;
                       // Dark logo (e.g. Iowa) -> light backdrop in the team's secondary color
-                      const plate = logoPlateColor(teamColor, side === "home" ? g.homeAltColor : g.awayAltColor);
+                      const storedAlt = side === "home" ? g.homeAltColor : g.awayAltColor;
+                      const altColor = storedAlt || espnAlt[normalizeTeamName(side === "home" ? g.home : g.away)] || null;
+                      const plate = logoPlateColor(teamColor, altColor, side === "home" ? g.homeAbbr : g.awayAbbr);
                       const plateInk = "#101012";
 
                       // Background and border logic
@@ -6092,7 +6122,7 @@ async function fetchEspnGameMetadata(fromDate, toDate) {
     try {
       const url =
         `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard` +
-        `?dates=${yyyymmdd}&limit=200`;
+        `?groups=80&dates=${yyyymmdd}&limit=400`;
       const res = await fetch(url);
       if (!res.ok) continue;
       const data = await res.json();
@@ -6168,13 +6198,18 @@ function hexLum(hex) {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
-// Team logos are mostly drawn in the team's primary color, so a very dark primary
-// (Iowa black, navy teams) means a dark logo that vanishes on our dark UI. For those
-// teams return a LIGHT backdrop color for the pick box: the team's secondary color
-// when it's light enough, else a light neutral. Returns null when no backdrop is needed.
-// Raise DARK_LOGO_LUM to flip more teams to a backdrop, lower it to flip fewer.
-const DARK_LOGO_LUM = 45;
-function logoPlateColor(primary, alt) {
+// Team logos are mostly drawn in the team's primary color, so a near-BLACK primary
+// (Iowa) means a logo that vanishes on our dark UI. For those teams return a LIGHT
+// backdrop for the pick box: the team's secondary color when it's light enough, else
+// a light neutral. Returns null when no backdrop is needed.
+//   DARK_LOGO_LUM: how dark a primary must be (0-255 brightness). Kept low on purpose
+//   so colorful logos on navy/blue teams (Florida, Cal, ...) are left alone.
+//   LOGO_PLATE_OVERRIDES: force an exact backdrop for a team, keyed by ESPN abbreviation.
+const DARK_LOGO_LUM = 25;
+const LOGO_PLATE_OVERRIDES = { IOWA: "#ffcd00" }; // Hawkeye gold
+function logoPlateColor(primary, alt, abbr) {
+  const ov = abbr ? LOGO_PLATE_OVERRIDES[String(abbr).toUpperCase()] : null;
+  if (ov) return ov;
   const pl = hexLum(primary);
   if (pl == null || pl >= DARK_LOGO_LUM) return null;
   const al = hexLum(alt);
