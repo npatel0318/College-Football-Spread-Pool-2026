@@ -1436,6 +1436,7 @@ export default function App() {
       if (homeArt) {
         if (homeArt.logo) updated.homeLogo = homeArt.logo;
         if (homeArt.color) updated.homeColor = homeArt.color;
+        if (homeArt.altColor) updated.homeAltColor = homeArt.altColor;
         if (homeArt.abbreviation) updated.homeAbbr = homeArt.abbreviation;
         if (homeArt.conference) updated.homeConf = homeArt.conference;
         updated.homeRank = homeArt.rank ?? updated.homeRank ?? null;
@@ -1443,12 +1444,13 @@ export default function App() {
       if (awayArt) {
         if (awayArt.logo) updated.awayLogo = awayArt.logo;
         if (awayArt.color) updated.awayColor = awayArt.color;
+        if (awayArt.altColor) updated.awayAltColor = awayArt.altColor;
         if (awayArt.abbreviation) updated.awayAbbr = awayArt.abbreviation;
         if (awayArt.conference) updated.awayConf = awayArt.conference;
         updated.awayRank = awayArt.rank ?? updated.awayRank ?? null;
       }
       // Count as fixed only if something actually changed
-      const changed = ["homeLogo","awayLogo","homeAbbr","awayAbbr","homeColor","awayColor"]
+      const changed = ["homeLogo","awayLogo","homeAbbr","awayAbbr","homeColor","awayColor","homeAltColor","awayAltColor"]
         .some((f) => updated[f] !== g[f]);
       if (changed) fixed += 1;
       return updated;
@@ -3963,6 +3965,9 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       const pickWon = showBadge && myPick === cover;
                       const teamColor = side === "home" ? g.homeColor : g.awayColor;
                       const teamLogo = side === "home" ? g.homeLogo : g.awayLogo;
+                      // Dark logo (e.g. Iowa) -> light backdrop in the team's secondary color
+                      const plate = logoPlateColor(teamColor, side === "home" ? g.homeAltColor : g.awayAltColor);
+                      const plateInk = "#101012";
 
                       // Background and border logic
                       let bg, borderColor, borderWidth = "1px";
@@ -3984,6 +3989,15 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                       } else {
                         bg = hexToRgba(teamColor, 0.06);
                         borderColor = hexToRgba(teamColor, 0.3);
+                      }
+                      if (plate) {
+                        // Keep the light backdrop in every state so the logo stays visible;
+                        // state is carried by the border (and the WON/LOST badge) instead.
+                        bg = plate;
+                        if (week.graded && isCorrect) { borderColor = COLORS.gold; borderWidth = "3px"; }
+                        else if (week.graded && isPicked && isWrong) { borderColor = COLORS.red; borderWidth = "3px"; }
+                        else if (isPicked) { borderColor = COLORS.chalk; borderWidth = "3px"; }
+                        else { borderColor = "rgba(0,0,0,0.3)"; borderWidth = "1px"; }
                       }
 
                       return (
@@ -4044,7 +4058,7 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                                 fontSize: "0.58rem",
                                 letterSpacing: "0.07em",
                                 textTransform: "uppercase",
-                                color: isPicked ? COLORS.goldBright : COLORS.muted,
+                                color: plate ? "rgba(16,16,18,0.65)" : (isPicked ? COLORS.goldBright : COLORS.muted),
                                 opacity: 0.9,
                               }}
                             >
@@ -4080,10 +4094,10 @@ function PicksTab({ leagueMeta, selectedWeek, week, weekLoading, picksCache, myN
                               {lbl.team.slice(0, 3).toUpperCase()}
                             </div>
                           )}
-                          <span className="text-xs font-semibold leading-tight w-full" style={{ color: COLORS.chalk }}>
+                          <span className="text-xs font-semibold leading-tight w-full" style={{ color: plate ? plateInk : COLORS.chalk }}>
                             {lbl.team}
                           </span>
-                          <span className="cfb-mono text-xs mt-0.5" style={{ color: COLORS.goldBright }}>
+                          <span className="cfb-mono text-xs mt-0.5" style={{ color: plate ? plateInk : COLORS.goldBright, fontWeight: plate ? 700 : undefined }}>
                             {lbl.num}
                           </span>
                         </button>
@@ -6146,6 +6160,28 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+// Perceived brightness (0-255) of a #rrggbb color, or null if unparseable.
+function hexLum(hex) {
+  const h = (hex || "").replace("#", "");
+  if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return null;
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+// Team logos are mostly drawn in the team's primary color, so a very dark primary
+// (Iowa black, navy teams) means a dark logo that vanishes on our dark UI. For those
+// teams return a LIGHT backdrop color for the pick box: the team's secondary color
+// when it's light enough, else a light neutral. Returns null when no backdrop is needed.
+// Raise DARK_LOGO_LUM to flip more teams to a backdrop, lower it to flip fewer.
+const DARK_LOGO_LUM = 45;
+function logoPlateColor(primary, alt) {
+  const pl = hexLum(primary);
+  if (pl == null || pl >= DARK_LOGO_LUM) return null;
+  const al = hexLum(alt);
+  if (al != null && al >= 110) return alt;
+  return "#d9d9d2";
+}
+
 function emptyGame() {
   return {
     id: newId(), away: "", home: "", favorite: "home", spread: "",
@@ -6270,8 +6306,8 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrp
     setGames((prev) => prev.map((g, i) => {
       if (i !== idx) return g;
       const updated = { ...g, ...patch };
-      if ("away" in patch && patch.away !== g.away) { updated.awayLogo = null; updated.awayColor = null; }
-      if ("home" in patch && patch.home !== g.home) { updated.homeLogo = null; updated.homeColor = null; }
+      if ("away" in patch && patch.away !== g.away) { updated.awayLogo = null; updated.awayColor = null; updated.awayAltColor = null; }
+      if ("home" in patch && patch.home !== g.home) { updated.homeLogo = null; updated.homeColor = null; updated.homeAltColor = null; }
       return updated;
     }));
   }
@@ -6371,6 +6407,7 @@ function GamesManager({ leagueMeta, weekCache, loadWeek, saveWeekGames, cleanOrp
           network: espnNetworks[homeKey] || espnNetworks[awayKey] || "",
           homeLogo: ht.logo || "", awayLogo: at.logo || "",
           homeColor: ht.color || "", awayColor: at.color || "",
+          homeAltColor: ht.altColor || "", awayAltColor: at.altColor || "",
           homeAbbr: ht.abbreviation || teamAbbrev(home),
           awayAbbr: at.abbreviation || teamAbbrev(away),
           conference: homeConf === awayConf ? homeConf : (homeConf || awayConf || ""),
